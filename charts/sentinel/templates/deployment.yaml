@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel
+  namespace: sentinel
+  labels:
+    app: sentinel
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: sentinel
+  template:
+    metadata:
+      labels:
+        app: sentinel
+    spec:
+      containers:
+        - name: sentinel
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/sentinel/config.yaml
+          env:
+            - name: FORGEJO_SENTINEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: forgejo-sentinel-token
+            - name: FORGEJO_OPERATOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: forgejo-operator-token
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: discord-bot-token
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: [AI_PROVIDER]-api-key
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: github-token
+            - name: FORGEJO_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: forgejo-webhook-secret
+            - name: SENTINEL_DB_PATH
+              value: /data/db/sentinel.db
+            - name: SENTINEL_INGRESS_HOST
+              value: {{ .Values.config.ingressHost | quote }}
+          ports:
+            - name: webhook
+              containerPort: {{ .Values.config.webhook.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: webhook
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: webhook
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sentinel
+              readOnly: true
+            - name: db
+              mountPath: /data/db
+            - name: workspace-forgejo
+              mountPath: /data/workspace/forgejo
+            - name: workspace-github
+              mountPath: /data/workspace/github
+      volumes:
+        - name: config
+          configMap:
+            name: sentinel-config
+        - name: db
+          persistentVolumeClaim:
+            claimName: sentinel-db
+        - name: workspace-forgejo
+          persistentVolumeClaim:
+            claimName: sentinel-workspace-forgejo
+        - name: workspace-github
+          persistentVolumeClaim:
+            claimName: sentinel-workspace-github

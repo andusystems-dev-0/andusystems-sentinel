@@ -1,0 +1,16 @@
+# IMPORTANT: accessModes MUST be ReadWriteOnce (RWO).
+# Longhorn RWO guarantees only one node mounts this volume.
+# Changing to RWX would allow multiple pods to write simultaneously,
+# corrupting go-git worktree state and SQLite database.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sentinel-workspace-forgejo
+  namespace: sentinel
+spec:
+  accessModes:
+    - ReadWriteOnce    # DO NOT change to ReadWriteMany
+  storageClassName: {{ .Values.persistence.forgejo.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.forgejo.size }}

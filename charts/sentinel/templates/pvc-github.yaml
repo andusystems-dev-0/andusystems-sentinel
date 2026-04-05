@@ -1,0 +1,15 @@
+# IMPORTANT: accessModes MUST be ReadWriteOnce (RWO).
+# GitHub staging workspace stores full repo HEAD snapshots.
+# RWO prevents concurrent node access that would corrupt worktree state.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sentinel-workspace-github
+  namespace: sentinel
+spec:
+  accessModes:
+    - ReadWriteOnce    # DO NOT change to ReadWriteMany
+  storageClassName: {{ .Values.persistence.github.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.github.size }}

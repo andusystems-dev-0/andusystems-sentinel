@@ -1,0 +1,7 @@
+.env
+config.yaml
+values-prod.yaml
+bin/
+*.db
+*.db-wal
+*.db-shm

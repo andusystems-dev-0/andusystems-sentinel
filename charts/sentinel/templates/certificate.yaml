@@ -1,0 +1,12 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sentinel-tls
+  namespace: sentinel
+spec:
+  secretName: sentinel-tls
+  issuerRef:
+    name: {{ .Values.ingress.certIssuer }}
+    kind: ClusterIssuer
+  dnsNames:
+    - {{ .Values.config.ingressHost }}

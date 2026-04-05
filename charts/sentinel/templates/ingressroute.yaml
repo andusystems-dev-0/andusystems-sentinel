@@ -1,0 +1,16 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: sentinel-webhook
+  namespace: sentinel
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`{{ .Values.config.ingressHost }}`) && PathPrefix(`/webhooks`)
+      kind: Rule
+      services:
+        - name: sentinel
+          port: {{ .Values.config.webhook.port }}
+  tls:
+    secretName: {{ .Values.ingress.tlsSecret }}

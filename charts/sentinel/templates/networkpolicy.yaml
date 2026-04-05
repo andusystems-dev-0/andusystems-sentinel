@@ -1,0 +1,43 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sentinel-egress
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app: sentinel
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Forgejo instance (HTTPS)
+    - ports:
+        - protocol: TCP
+          port: 443
+
+    # GitHub API (HTTPS)
+    - ports:
+        - protocol: TCP
+          port: 443
+
+    # [AI_PROVIDER] [AI_ASSISTANT] API (HTTPS)
+    - ports:
+        - protocol: TCP
+          port: 443
+
+    # Discord (HTTPS + gateway)
+    - ports:
+        - protocol: TCP
+          port: 443
+
+    # Ollama internal cluster service
+    - ports:
+        - protocol: TCP
+          port: 11434

@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-config
+  namespace: sentinel
+data:
+  config.yaml: |
+    sentinel:
+      git_name: "Sentinel"
+      git_email: "sentinel@andusystems.com"
+      forgejo_username: "sentinel"
+      github_username: "sentinel-bot"
+
+    forgejo:
+      base_url: {{ .Values.config.forgejo.baseUrl | quote }}
+
+    github:
+      base_url: "https://api.github.com"
+      org: "andusystems"
+
+    discord:
+      guild_id: ""
+      pr_channel_id: ""
+      findings_channel_id: ""
+      command_channel_id: ""
+      operator_user_ids: []
+
+    pr:
+      merge_strategy: "squash"
+      high_priority_types:
+        - "code"
+        - "fix"
+        - "feat"
+        - "vulnerability"
+      mention_on_security: true
+      mention_cooldown_minutes: 60
+      housekeeping:
+        enabled: true
+        open_only_if_content: true
+
+    nightly:
+      cron: "0 23 * * *"
+      skip_if_active_dev_within_hours: 2
+      flood_threshold: 5
+
+    digest:
+      enabled: true
+      low_priority_collapse_threshold: 5
+
+    webhook:
+      port: {{ .Values.config.webhook.port }}
+      event_queue_size: 100
+      processing_workers: 4
+      review_cooldown_minutes: 5
+
+    ollama:
+      host: {{ .Values.config.ollama.host | quote }}
+      model: "qwen2.5-coder:14b"
+      temperature: 0.1
+      context_window: 16384
+      response_buffer_tokens: 2048
+
+    claude_api:
+      model: "[AI_ASSISTANT]-sonnet-4-6"
+      max_tokens: 8192
+      rpm_limit: 50
+      rate_limit_buffer_ms: 200
+
+    claude_code:
+      binary_path: "/usr/local/bin/[AI_ASSISTANT]"
+      flags:
+        - "--output-format=json"
+        - "--no-interactive"
+      task_timeout_minutes: 30
+
+    worktree:
+      base_path: {{ .Values.config.worktree.basePath | quote }}
+
+    sanitize:
+      high_confidence_threshold: 0.9
+      medium_confidence_threshold: 0.6
+      skip_patterns:
+        - "*.test"
+        - "testdata/**"
+        - "fixtures/**"
+        - "*.example"
+      category_reasons:
+        SECRET: "secret or credential detected"
+        API_KEY: "API key or token detected"
+        PASSWORD: "password or passphrase detected"
+        PRIVATE_KEY: "private key material detected"
+        CONNECTION_STRING: "database or service connection string detected"
+        INTERNAL_URL: "internal hostname or IP address detected"
+
+    allowlist:
+      confirmation_ttl_minutes: 10
+
+    repos: []
+    excluded_repos: []

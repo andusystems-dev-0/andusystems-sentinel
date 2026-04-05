@@ -1,0 +1,403 @@
+// Package main is the sentinel entry point.
+// It loads config, initialises all subsystems, wires everything together,
+// starts the cron scheduler, webhook server, and Discord bot.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/joho/godotenv"
+	"github.com/robfig/cron/v3"
+
+	"github.com/andusystems/sentinel/internal/config"
+	"github.com/andusystems/sentinel/internal/discord"
+	"github.com/andusystems/sentinel/internal/docs"
+	"github.com/andusystems/sentinel/internal/executor"
+	"github.com/andusystems/sentinel/internal/forge"
+	"github.com/andusystems/sentinel/internal/llm"
+	"github.com/andusystems/sentinel/internal/migration"
+	"github.com/andusystems/sentinel/internal/pipeline"
+	"github.com/andusystems/sentinel/internal/prnotify"
+	"github.com/andusystems/sentinel/internal/sanitize"
+	"github.com/andusystems/sentinel/internal/store"
+	syncp "github.com/andusystems/sentinel/internal/sync"
+	"github.com/andusystems/sentinel/internal/types"
+	"github.com/andusystems/sentinel/internal/webhook"
+	"github.com/andusystems/sentinel/internal/worktree"
+)
+
+func main() {
+	// ---- Flags ---------------------------------------------------------------
+	configPath := flag.String("config", "config.yaml", "Path to config file")
+	dryRun := flag.Bool("dry-run", false, "Dry run: no PRs, no GitHub pushes")
+	mode := flag.String("mode", "run", "Mode: run | sync | migrate | nightly")
+	targetRepo := flag.String("repo", "", "Target repo (for sync/migrate/dry-run modes)")
+	force := flag.Bool("force", false, "Force mode (for migrate)")
+	flag.Parse()
+
+	// Suppress unused warning in dry-run mode (feature flag handled below).
+	_ = *dryRun
+
+	// ---- .env for local dev --------------------------------------------------
+	_ = godotenv.Load(".env")
+
+	// ---- Logging -------------------------------------------------------------
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
+	// ---- Config --------------------------------------------------------------
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		slog.Error("load config", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("sentinel starting", "mode", *mode)
+
+	// ---- Database ------------------------------------------------------------
+	dbPath := "/data/db/sentinel.db"
+	if v := os.Getenv("SENTINEL_DB_PATH"); v != "" {
+		dbPath = v
+	}
+	db, err := store.Open(dbPath)
+	if err != nil {
+		slog.Error("open database", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	// ---- Worktree ------------------------------------------------------------
+	wtLock := worktree.NewForgejoWorktreeLock()
+	fileLock := worktree.NewFileMutexRegistry()
+	wt := worktree.NewManager(cfg, wtLock, fileLock)
+
+	// ---- Forge clients -------------------------------------------------------
+	forgejoClient, err := forge.NewForgejoClient(cfg)
+	if err != nil {
+		slog.Error("create forgejo client", "err", err)
+		os.Exit(1)
+	}
+	githubClient := forge.NewGitHubClient(cfg)
+
+	// ---- LLM -----------------------------------------------------------------
+	llmClient, err := llm.NewClient(cfg)
+	if err != nil {
+		slog.Error("create LLM client", "err", err)
+		os.Exit(1)
+	}
+	batcher := llm.NewBatcher(llmClient, cfg)
+
+	// ---- Sanitization pipeline -----------------------------------------------
+	var claudeAPI types.ClaudeAPIClient
+	if cfg.ClaudeAPI.APIKey != "" {
+		claudeAPI = &claudeAPIStub{cfg: cfg}
+	}
+	sanitizePipeline, err := sanitize.NewPipeline(llmClient, claudeAPI, &cfg.Sanitize)
+	if err != nil {
+		slog.Error("create sanitize pipeline", "err", err)
+		os.Exit(1)
+	}
+
+	// ---- Discord bot ---------------------------------------------------------
+	bot, err := discord.NewBot(cfg)
+	if err != nil {
+		slog.Error("create Discord bot", "err", err)
+		os.Exit(1)
+	}
+	bot.SetConfirmationStore(db.Confirmations)
+
+	// ---- PR Notifier ---------------------------------------------------------
+	mentionTracker := prnotify.NewMentionTracker(db.Actions, cfg.PR.MentionCooldownMinutes)
+	notifier := prnotify.NewNotifier(bot, forgejoClient, db.PRs, db.Actions, mentionTracker, cfg)
+
+	// Register PR reaction handlers on bot.
+	bot.RegisterPRHandler(prnotify.NewPRApproveHandler(notifier, db.PRs))
+	bot.RegisterPRHandler(prnotify.NewPRCloseHandler(notifier, db.PRs))
+	bot.RegisterPRHandler(prnotify.NewPRDiscussHandler(notifier, db.PRs))
+
+	// Register finding reaction handlers on bot.
+	bot.RegisterFindingHandler(discord.NewFindingApproveHandler(bot, db.Resolutions, wt, fileLock, db.Actions))
+	bot.RegisterFindingHandler(discord.NewFindingRejectHandler(bot, db.Resolutions, db.Actions))
+	bot.RegisterFindingHandler(discord.NewFindingReanalyzeHandler(bot, db.Resolutions, claudeAPI, db.Actions))
+	bot.RegisterFindingHandler(discord.NewFindingCustomHandler(bot, db.Resolutions, wt, fileLock, db.Actions))
+
+	// ---- Executor ------------------------------------------------------------
+	taskExecutor := executor.NewTaskExecutor(cfg, cfg.Worktree.BasePath+"/forgejo")
+
+	// ---- Sync runner ---------------------------------------------------------
+	syncRunner := syncp.NewRunner(cfg, db, wt, wtLock, sanitizePipeline, bot, forgejoClient, db.ApprovedValues)
+
+	// ---- Migration manager ---------------------------------------------------
+	migrationMgr := migration.NewManager(cfg, db, wt, wtLock, sanitizePipeline, bot, forgejoClient, githubClient, db.ApprovedValues)
+
+	// ---- Docs + Changelog ----------------------------------------------------
+	docGen := docs.NewGenerator(cfg, db, wt, wtLock, taskExecutor, forgejoClient, bot, notifier, db.PRs)
+	changelogMgr := docs.NewChangelogManager(cfg, db, wt, wtLock, llmClient, forgejoClient)
+
+	// ---- Nightly pipeline ---------------------------------------------------
+	nightlyRunner := pipeline.NewNightlyRunner(cfg, db, wt, wtLock, batcher, taskExecutor, forgejoClient, notifier, docGen, changelogMgr)
+
+	// ---- Sync handler (Forgejo→Discord) --------------------------------------
+	syncHandler := prnotify.NewSyncHandler(notifier, db.PRs, db.Actions, syncRunner)
+
+	// ---- Webhook queue + processor -------------------------------------------
+	queue := webhook.NewQueue(cfg.Webhook.EventQueueSize)
+	prDisp := &prEventDispatch{syncHandler: syncHandler}
+	pushDisp := &pushEventDispatch{db: db, forge: forgejoClient, notifier: notifier, cfg: cfg}
+	processor := webhook.NewEventProcessor(queue, prDisp, pushDisp, cfg.Webhook.ProcessingWorkers)
+
+	// ---- Context + shutdown --------------------------------------------------
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	// ---- Mode dispatch -------------------------------------------------------
+	switch *mode {
+	case "sync":
+		if *targetRepo == "" {
+			fmt.Fprintln(os.Stderr, "error: --repo required for sync mode")
+			os.Exit(1)
+		}
+		if err := syncRunner.Sync(ctx, *targetRepo); err != nil {
+			slog.Error("sync failed", "repo", *targetRepo, "err", err)
+			os.Exit(1)
+		}
+		return
+
+	case "doc-gen":
+		if *targetRepo == "" {
+			fmt.Fprintln(os.Stderr, "error: --repo required for doc-gen mode")
+			os.Exit(1)
+		}
+		if err := docGen.RunFull(ctx, *targetRepo); err != nil {
+			slog.Error("doc-gen failed", "repo", *targetRepo, "err", err)
+			os.Exit(1)
+		}
+		return
+
+	case "migrate":
+		if *targetRepo == "" {
+			fmt.Fprintln(os.Stderr, "error: --repo required for migrate mode")
+			os.Exit(1)
+		}
+		if err := bot.Start(ctx); err != nil {
+			slog.Error("start discord bot for migration", "err", err)
+			os.Exit(1)
+		}
+		if err := migrationMgr.Migrate(ctx, *targetRepo, *force); err != nil {
+			slog.Error("migration failed", "repo", *targetRepo, "err", err)
+			os.Exit(1)
+		}
+		bot.Stop()
+		return
+
+	case "nightly":
+		if *targetRepo != "" {
+			if err := nightlyRunner.Run(ctx, *targetRepo); err != nil {
+				slog.Error("nightly run failed", "repo", *targetRepo, "err", err)
+				os.Exit(1)
+			}
+		} else {
+			nightlyRunner.RunAll(ctx)
+		}
+		return
+	}
+
+	// ---- Full daemon mode ("run") --------------------------------------------
+
+	// Register webhooks on all repos at startup (best-effort).
+	go func() {
+		ingressHost := os.Getenv("SENTINEL_INGRESS_HOST")
+		if ingressHost != "" {
+			if err := forgejoClient.RegisterAllWebhooks(ctx, ingressHost); err != nil {
+				slog.Warn("webhook registration incomplete", "err", err)
+			}
+		}
+	}()
+
+	// Start Discord bot.
+	if err := bot.Start(ctx); err != nil {
+		slog.Error("start discord bot", "err", err)
+		os.Exit(1)
+	}
+
+	// Start cron scheduler.
+	c := cron.New()
+	if _, err := c.AddFunc(cfg.Nightly.Cron, func() {
+		slog.Info("cron: starting nightly pipeline")
+		nightlyRunner.RunAll(ctx)
+		bot.PostDigest(ctx, db.PRs)
+	}); err != nil {
+		slog.Error("invalid cron expression", "cron", cfg.Nightly.Cron, "err", err)
+		os.Exit(1)
+	}
+	c.Start()
+
+	// Start webhook event processor in background.
+	go processor.Start(ctx)
+
+	// Start webhook HTTP server in background.
+	server := webhook.NewServer(cfg.Webhook.Port, queue, cfg.Webhook.Secret)
+	go func() {
+		if err := server.Start(); err != nil {
+			slog.Error("webhook server error", "err", err)
+		}
+	}()
+
+	slog.Info("sentinel running",
+		"webhook_port", cfg.Webhook.Port,
+		"nightly_cron", cfg.Nightly.Cron,
+		"repos", len(cfg.Repos),
+	)
+
+	// ---- Graceful shutdown ---------------------------------------------------
+	<-sigCh
+	slog.Info("shutdown signal received")
+	cancel()
+
+	// Wait for cron jobs to finish (max 5 min).
+	cronCtx := c.Stop()
+	select {
+	case <-cronCtx.Done():
+	case <-time.After(5 * time.Minute):
+		slog.Warn("cron did not stop within 5 minutes")
+	}
+
+	// Stop accepting new webhook connections (30s drain).
+	server.Stop(30 * time.Second)
+
+	// Close queue so workers exit.
+	queue.Close()
+
+	// Give workers a moment to finish in-flight events.
+	time.Sleep(2 * time.Second)
+
+	bot.Stop()
+	db.Close()
+	slog.Info("sentinel stopped")
+}
+
+// ---- [AI_ASSISTANT] API stub --------------------------------------------------------
+
+// claudeAPIStub implements types.ClaudeAPIClient.
+// Replace with a full [AI_PROVIDER] SDK client for production.
+type claudeAPIStub struct {
+	cfg *config.Config
+}
+
+func (c *claudeAPIStub) SanitizeChunk(_ context.Context, content string) ([]types.SanitizationFinding, error) {
+	// STUB: Full [AI_PROVIDER] SDK implementation.
+	// When complete, this sends content to [AI_ASSISTANT]-sonnet-4-6 via the Messages API,
+	// rate-limited by golang.org/x/time/rate (rpm_limit tokens/minute).
+	slog.Debug("[AI_ASSISTANT] API Layer 3 stub called", "content_len", len(content))
+	return nil, nil
+}
+
+// ---- Webhook event dispatchers ----------------------------------------------
+
+type prEventDispatch struct {
+	syncHandler *prnotify.SyncHandler
+}
+
+func (d *prEventDispatch) HandlePREvent(ctx context.Context, event types.ForgejoEvent) {
+	d.syncHandler.HandlePRWebhook(ctx, event)
+}
+
+type pushEventDispatch struct {
+	db       *store.DB
+	forge    types.ForgejoProvider
+	notifier *prnotify.Notifier
+	cfg      *config.Config
+}
+
+func (d *pushEventDispatch) HandlePushEvent(ctx context.Context, event types.ForgejoEvent) {
+	branch := parsePushBranch(event.Payload)
+	if !strings.HasPrefix(branch, "sentinel/") {
+		return
+	}
+
+	// Look up the task that created this branch.
+	task, err := d.db.Tasks.GetByBranch(ctx, branch)
+	if err != nil {
+		slog.Error("push handler: get task by branch", "branch", branch, "err", err)
+		return
+	}
+	if task == nil {
+		slog.Warn("push handler: no task found for sentinel branch", "branch", branch, "repo", event.Repo)
+		return
+	}
+
+	prType := pipeline.TaskTypeToPRType(task.TaskType)
+	prTitle := pipeline.PRTitleFor(types.TaskSpec{Type: task.TaskType, Title: task.Title})
+	tier := pipeline.PriorityTier(prType, d.cfg.PR.HighPriorityTypes)
+
+	// Open the PR on Forgejo.
+	prNumber, prURL, err := d.forge.CreatePR(ctx, types.OpenPROptions{
+		Repo:         event.Repo,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Title:        prTitle,
+		Body:         task.Description,
+		PRType:       prType,
+		PriorityTier: tier,
+	})
+	if err != nil {
+		slog.Error("push handler: create PR", "branch", branch, "repo", event.Repo, "err", err)
+		return
+	}
+
+	// Post Discord notification first to get the message ID.
+	pr := types.SentinelPR{
+		ID:               store.NewID(),
+		Repo:             event.Repo,
+		PRNumber:         prNumber,
+		PRUrl:            prURL,
+		Branch:           branch,
+		BaseBranch:       "main",
+		Title:            prTitle,
+		PRType:           prType,
+		PriorityTier:     tier,
+		Status:           types.PRStatusOpen,
+		OpenedAt:         time.Now(),
+		TaskID:           task.ID,
+		DiscordChannelID: d.cfg.Discord.PRChannelID,
+	}
+
+	msgID, err := d.notifier.PostPRNotification(ctx, pr, task.Description)
+	if err != nil {
+		slog.Error("push handler: post PR notification", "repo", event.Repo, "pr", prNumber, "err", err)
+		// PR is open on Forgejo — save the DB record anyway so reactions can still be handled.
+	}
+	pr.DiscordMessageID = msgID
+
+	if err := d.db.PRs.Create(ctx, pr); err != nil {
+		slog.Error("push handler: save sentinel PR record", "repo", event.Repo, "pr", prNumber, "err", err)
+		return
+	}
+
+	d.db.Tasks.SetPRNumber(ctx, task.ID, prNumber)
+
+	slog.Info("push handler: PR opened", "repo", event.Repo, "branch", branch, "pr", prNumber)
+}
+
+// parsePushBranch extracts the branch name from a Forgejo push webhook payload.
+func parsePushBranch(payload []byte) string {
+	var p struct {
+		Ref string `json:"ref"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(p.Ref, "refs/heads/")
+}

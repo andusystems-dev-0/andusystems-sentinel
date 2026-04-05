@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel
+  namespace: sentinel
+  labels:
+    app: sentinel
+spec:
+  type: ClusterIP
+  ports:
+    - name: webhook
+      port: {{ .Values.config.webhook.port }}
+      targetPort: webhook
+      protocol: TCP
+  selector:
+    app: sentinel

@@ -1,0 +1,43 @@
+# argocd/sentinel-app.yaml
+# IMPORTANT: syncPolicy is MANUAL (not automated).
+# Sentinel has side effects on Forgejo, GitHub, and Discord.
+# An automated bad deploy could open spurious PRs or send erroneous Discord messages.
+# Always review changes before syncing in ArgoCD UI.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sentinel
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  project: default
+  source:
+    repoURL: https://git.andusystems.com/andusystems/sentinel
+    targetRevision: HEAD
+    path: charts/sentinel
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sentinel
+  syncPolicy:
+    # NO automated sync — operator must approve each deploy in ArgoCD UI
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+  ignoreDifferences:
+    - group: ""
+      kind: PersistentVolumeClaim
+      jsonPointers:
+        - /status
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /metadata/annotations/deployment.kubernetes.io~1revision
+    - group: cert-manager.io
+      kind: Certificate
+      jsonPointers:
+        - /status

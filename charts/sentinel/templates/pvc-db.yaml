@@ -1,0 +1,15 @@
+# IMPORTANT: accessModes MUST be ReadWriteOnce (RWO).
+# SQLite requires exclusive file-level access.
+# Using RWX with multiple nodes mounting simultaneously will corrupt the database.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sentinel-db
+  namespace: sentinel
+spec:
+  accessModes:
+    - ReadWriteOnce    # DO NOT change to ReadWriteMany — SQLite requires exclusive file access
+  storageClassName: {{ .Values.persistence.db.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.db.size }}

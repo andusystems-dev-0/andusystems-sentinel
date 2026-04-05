@@ -1,0 +1,51 @@
+image:
+  repository: registry.andusystems.com/sentinel
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1  # MUST be 1 — SQLite requires exclusive PVC access
+
+config:
+  forgejo:
+    baseUrl: "https://git.andusystems.com"
+  webhook:
+    port: 8080
+  ollama:
+    host: "http://ollama.sentinel.svc.cluster.local:11434"
+  worktree:
+    basePath: "/data/workspace"
+  ingressHost: "sentinel.andusystems.com"
+
+secrets:
+  forgejoSentinelToken: ""
+  forgejoOperatorToken: ""
+  discordBotToken: ""
+  anthropicApiKey: ""
+  githubToken: ""
+  forgejoWebhookSecret: ""
+
+persistence:
+  forgejo:
+    storageClass: "longhorn"
+    accessModes: ["ReadWriteOnce"]   # RWO — never RWX
+    size: "20Gi"
+  github:
+    storageClass: "longhorn"
+    accessModes: ["ReadWriteOnce"]   # RWO — stores full repo HEAD snapshots
+    size: "50Gi"
+  db:
+    storageClass: "longhorn"
+    accessModes: ["ReadWriteOnce"]   # RWO — SQLite exclusive file access required
+    size: "5Gi"
+
+ingress:
+  tlsSecret: "sentinel-tls"
+  certIssuer: "letsencrypt-prod"
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
