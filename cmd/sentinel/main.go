@@ -28,6 +28,7 @@ import (
 	"github.com/andusystems/sentinel/internal/migration"
 	"github.com/andusystems/sentinel/internal/pipeline"
 	"github.com/andusystems/sentinel/internal/prnotify"
+	"github.com/andusystems/sentinel/internal/reconcile"
 	"github.com/andusystems/sentinel/internal/sanitize"
 	"github.com/andusystems/sentinel/internal/store"
 	syncp "github.com/andusystems/sentinel/internal/sync"
@@ -184,13 +185,22 @@ func main() {
 		return
 
 	case "doc-gen":
-		if *targetRepo == "" {
-			fmt.Fprintln(os.Stderr, "error: --repo required for doc-gen mode")
-			os.Exit(1)
-		}
-		if err := docGen.RunFull(ctx, *targetRepo); err != nil {
-			slog.Error("doc-gen failed", "repo", *targetRepo, "err", err)
-			os.Exit(1)
+		if *targetRepo != "" {
+			if err := docGen.RunFull(ctx, *targetRepo); err != nil {
+				slog.Error("doc-gen failed", "repo", *targetRepo, "err", err)
+				os.Exit(1)
+			}
+		} else {
+			for _, r := range cfg.Repos {
+				if r.Excluded {
+					continue
+				}
+				slog.Info("doc-gen: starting", "repo", r.Name)
+				if err := docGen.RunFull(ctx, r.Name); err != nil {
+					slog.Error("doc-gen failed", "repo", r.Name, "err", err)
+					continue
+				}
+			}
 		}
 		return
 
@@ -252,6 +262,26 @@ func main() {
 	}
 	c.Start()
 
+	// ---- Auto-bootstrap + drift reconciler -----------------------------------
+	// Bootstrap: run Mode 4 migration for any sync-enabled repo whose GitHub
+	// mirror doesn't exist yet or is empty. This is sequential and may take
+	// a while; we run it in a goroutine so the webhook listener stays
+	// responsive, then the drift reconciler kicks in afterward.
+	reconciler := reconcile.NewReconciler(cfg, db, wt, wtLock, syncRunner)
+	go func() {
+		slog.Info("bootstrap: checking for empty/missing GitHub mirrors")
+		migrationMgr.AutoBootstrap(ctx)
+		if cfg.Reconcile.OnStartup {
+			slog.Info("reconcile: startup drift check")
+			reconciler.RunOnce(ctx)
+		}
+	}()
+	var stopReconciler func() = func() {}
+	if cfg.Reconcile.IntervalMinutes > 0 {
+		stopReconciler = reconciler.StartPeriodic(ctx,
+			time.Duration(cfg.Reconcile.IntervalMinutes)*time.Minute)
+	}
+
 	// Start webhook event processor in background.
 	go processor.Start(ctx)
 
@@ -273,6 +303,9 @@ func main() {
 	<-sigCh
 	slog.Info("shutdown signal received")
 	cancel()
+
+	// Stop the reconciler ticker before cron, so no new drift sync starts.
+	stopReconciler()
 
 	// Wait for cron jobs to finish (max 5 min).
 	cronCtx := c.Stop()

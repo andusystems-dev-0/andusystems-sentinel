@@ -13,27 +13,61 @@ import (
 	"github.com/andusystems/sentinel/internal/types"
 )
 
-// ConfirmForce posts a confirmation message to Discord and polls the DB
-// for operator ✅/❌ reaction (set by the reaction handler).
-// Returns true if confirmed, false if rejected or TTL expired.
-func ConfirmForce(
+// MigrationKind distinguishes confirmation message wording.
+type MigrationKind string
+
+const (
+	// MigrationInitial — first-time migration to a fresh/empty GitHub mirror.
+	MigrationInitial MigrationKind = "initial"
+	// MigrationForce — re-migration that will overwrite existing GitHub history.
+	MigrationForce MigrationKind = "force"
+	// MigrationBootstrap — automatic daemon-startup migration of an empty mirror.
+	MigrationBootstrap MigrationKind = "bootstrap"
+)
+
+// ConfirmMigration posts a confirmation message to Discord and polls the DB
+// for operator ✅/❌ reaction (set by the reaction handler). Message wording
+// varies by kind (initial / force / bootstrap). Returns true if confirmed,
+// false if rejected or TTL expired.
+func ConfirmMigration(
 	ctx context.Context,
 	repo string,
+	githubPath string,
+	kind MigrationKind,
 	db *store.DB,
 	discord types.DiscordBot,
 	channelID string,
 	ttlMinutes int,
 ) (bool, error) {
-	msgID, err := discord.PostChannelMessageID(ctx, channelID,
-		fmt.Sprintf(
+	var body string
+	switch kind {
+	case MigrationForce:
+		body = fmt.Sprintf(
 			"⚠️ **Force migration requested for `%s`**\n\n"+
-				"The GitHub mirror for this repo is **non-empty**. Proceeding will overwrite its contents.\n\n"+
-				"React ✅ to confirm or ❌ to cancel. This confirmation expires in %d minutes.",
-			repo, ttlMinutes,
-		),
-	)
+				"The GitHub mirror `%s` is **non-empty**. Proceeding will overwrite its contents.\n\n"+
+				"React ✅ to confirm or ❌ to cancel. Expires in %d minutes.",
+			repo, githubPath, ttlMinutes,
+		)
+	case MigrationBootstrap:
+		body = fmt.Sprintf(
+			"🤖 **Auto-bootstrap migration requested for `%s`**\n\n"+
+				"The GitHub mirror `%s` is empty or missing. Sentinel will run a full sanitization pass "+
+				"and push the Forgejo HEAD to GitHub.\n\n"+
+				"React ✅ to confirm or ❌ to skip this repo. Expires in %d minutes.",
+			repo, githubPath, ttlMinutes,
+		)
+	default: // MigrationInitial
+		body = fmt.Sprintf(
+			"🚀 **Initial migration requested for `%s`**\n\n"+
+				"Sentinel will sanitize every file at Forgejo HEAD and force-push a single commit to `%s`.\n\n"+
+				"React ✅ to confirm or ❌ to cancel. Expires in %d minutes.",
+			repo, githubPath, ttlMinutes,
+		)
+	}
+
+	msgID, err := discord.PostChannelMessageID(ctx, channelID, body)
 	if err != nil {
-		return false, fmt.Errorf("post force confirmation: %w", err)
+		return false, fmt.Errorf("post migration confirmation: %w", err)
 	}
 
 	discord.SeedCommandReactions(ctx, channelID, msgID)
@@ -42,7 +76,7 @@ func ConfirmForce(
 	expires := time.Now().Add(time.Duration(ttlMinutes) * time.Minute)
 	confirmation := store.PendingConfirmation{
 		ID:               newID(),
-		Kind:             "force_migration",
+		Kind:             "migration_" + string(kind),
 		Repo:             repo,
 		DiscordMessageID: msgID,
 		DiscordChannelID: channelID,

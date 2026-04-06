@@ -36,7 +36,7 @@ func NewPipeline(llm types.LLMClient, [AI_ASSISTANT] types.ClaudeAPIClient, cfg 
 	}
 
 	var l3 *layer3Claude
-	if [AI_ASSISTANT] != nil {
+	if [AI_ASSISTANT] != nil && cfg.Layer3Enabled {
 		l3 = newLayer3Claude([AI_ASSISTANT])
 	}
 

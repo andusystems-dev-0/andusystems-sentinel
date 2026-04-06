@@ -189,8 +189,11 @@ func (r *Runner) Sync(ctx context.Context, repoName string) error {
 		slog.Error("sync: push staging failed", "repo", repoName, "err", pushErr)
 	}
 
-	// Update sync state.
-	r.db.SyncRuns.SetRepoSyncSHA(ctx, repoName, currentSHA)
+	// Only update the baseline SHA if the push actually landed — otherwise
+	// the reconciler (or next webhook) will correctly retry.
+	if pushErr == nil {
+		r.db.SyncRuns.SetRepoSyncSHA(ctx, repoName, currentSHA)
+	}
 
 	now := time.Now()
 	run.CompletedAt = &now

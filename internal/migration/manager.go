@@ -55,9 +55,23 @@ func NewManager(
 	}
 }
 
-// Migrate runs Mode 4 full-repo migration for repoName.
+// Migrate runs Mode 4 full-repo migration for repoName. Every invocation
+// (force, initial, or bootstrap) posts a Discord ✅/❌ confirmation and waits
+// before touching GitHub. Bootstrap callers MUST set kind=MigrationBootstrap
+// via MigrateWithKind; the boolean Migrate() below preserves the CLI-friendly
+// signature and selects MigrationForce/MigrationInitial automatically.
 func (m *Manager) Migrate(ctx context.Context, repoName string, force bool) error {
-	slog.Info("mode4 migration start", "repo", repoName, "force", force)
+	kind := MigrationInitial
+	if force {
+		kind = MigrationForce
+	}
+	return m.MigrateWithKind(ctx, repoName, force, kind)
+}
+
+// MigrateWithKind is the full-control variant used by AutoBootstrap to tag
+// the Discord confirmation as a bootstrap-initiated migration.
+func (m *Manager) MigrateWithKind(ctx context.Context, repoName string, force bool, kind MigrationKind) error {
+	slog.Info("mode4 migration start", "repo", repoName, "force", force, "kind", kind)
 
 	// Pre-checks.
 	status, err := m.db.Reviews.GetMigrationStatus(ctx, repoName)
@@ -100,16 +114,15 @@ func (m *Manager) Migrate(ctx context.Context, repoName string, force bool) erro
 	}
 	slog.Info("mode4 migration: github repo ready", "repo", repoName, "github_path", githubPath)
 
-	if force {
-		// Require operator confirmation.
-		confirmed, err := ConfirmForce(ctx, repoName, m.db, m.discord,
-			m.cfg.Discord.CommandChannelID, m.cfg.Allowlist.ConfirmationTTLMinutes)
-		if err != nil {
-			return fmt.Errorf("force confirmation: %w", err)
-		}
-		if !confirmed {
-			return fmt.Errorf("force migration not confirmed")
-		}
+	// Require operator confirmation for ALL migrations — initial, force, or
+	// auto-bootstrap. The Discord message wording varies by kind.
+	confirmed, err := ConfirmMigration(ctx, repoName, githubPath, kind, m.db, m.discord,
+		m.cfg.Discord.CommandChannelID, m.cfg.Allowlist.ConfirmationTTLMinutes)
+	if err != nil {
+		return fmt.Errorf("migration confirmation: %w", err)
+	}
+	if !confirmed {
+		return fmt.Errorf("migration not confirmed")
 	}
 
 	// Pull latest.
@@ -208,6 +221,16 @@ func (m *Manager) Migrate(ctx context.Context, repoName string, force bool) erro
 
 		m.wt.WriteGitHubStaging(ctx, repoName, filename, result.SanitizedContent)
 
+		// Dedup: skip findings for files that already have pending resolutions
+		// from a prior migration attempt (daemon restart, context cancel, etc.).
+		existing, _ := m.db.Resolutions.GetPendingForFile(ctx, repoName, filename)
+		if len(existing) > 0 {
+			slog.Info("mode4 migration: findings already pending for file, skipping discord post",
+				"file", filename, "pending", len(existing))
+			run.FilesSynced++
+			continue
+		}
+
 		for _, f := range result.Findings {
 			f.SyncRunID = runID
 			m.db.Findings.Create(ctx, f)
@@ -262,15 +285,20 @@ func (m *Manager) Migrate(ctx context.Context, repoName string, force bool) erro
 
 	// Single orphan commit force-pushed to main — overwrites any prior
 	// GitHub history so the initial migration is always one clean commit.
+	pushOK := false
 	if sha, err := m.wt.PushAllStagingInitial(ctx, repoName, fmt.Sprintf("chore(migrate): initial sentinel migration of %s", repoName)); err != nil {
 		slog.Error("migration: push staging failed", "repo", repoName, "err", err)
 	} else {
 		slog.Info("migration: push staging ok", "repo", repoName, "sha", sha)
+		pushOK = true
 	}
 
-	// Update state.
-	m.db.SyncRuns.SetRepoSyncSHA(ctx, repoName, headSHA)
-	m.db.Reviews.CompleteMigration(ctx, repoName, headSHA)
+	// Only mark as synced if the push actually landed — otherwise the
+	// reconciler won't detect that GitHub is still behind.
+	if pushOK {
+		m.db.SyncRuns.SetRepoSyncSHA(ctx, repoName, headSHA)
+		m.db.Reviews.CompleteMigration(ctx, repoName, headSHA)
+	}
 
 	now := time.Now()
 	run.CompletedAt = &now
@@ -295,6 +323,51 @@ func (m *Manager) Migrate(ctx context.Context, repoName string, force bool) erro
 
 	slog.Info("mode4 migration complete", "repo", repoName, "files", run.FilesSynced)
 	return nil
+}
+
+// AutoBootstrap runs the initial Mode 4 migration for every sync-enabled
+// repo whose GitHub mirror does not yet exist or is empty. Repos with
+// existing GitHub content are left alone (the drift reconciler + Mode 3
+// sync path keeps them up to date). Errors on individual repos are logged
+// and skipped — bootstrap never aborts the daemon.
+func (m *Manager) AutoBootstrap(ctx context.Context) {
+	for i := range m.cfg.Repos {
+		r := m.cfg.Repos[i]
+		if r.Excluded || !r.SyncEnabled {
+			continue
+		}
+		if err := m.github.EnsureRepo(ctx, r.GitHubPath, r.Description); err != nil {
+			slog.Warn("bootstrap: ensure github repo failed",
+				"repo", r.Name, "github_path", r.GitHubPath, "err", err)
+			continue
+		}
+		empty, err := m.github.IsEmpty(ctx, r.GitHubPath)
+		if err != nil {
+			slog.Warn("bootstrap: empty-check failed",
+				"repo", r.Name, "github_path", r.GitHubPath, "err", err)
+			continue
+		}
+		if !empty {
+			slog.Debug("bootstrap: github mirror already populated, skipping",
+				"repo", r.Name)
+			continue
+		}
+		slog.Info("bootstrap: github mirror empty, running initial migration",
+			"repo", r.Name, "github_path", r.GitHubPath)
+		// Clear any stale DB status so Migrate() doesn't refuse.
+		if err := m.db.Reviews.SetMigrationStatus(ctx, r.Name, "pending", "", ""); err != nil {
+			slog.Warn("bootstrap: reset migration status failed",
+				"repo", r.Name, "err", err)
+			continue
+		}
+		if err := m.MigrateWithKind(ctx, r.Name, false, MigrationBootstrap); err != nil {
+			slog.Error("bootstrap: migration failed",
+				"repo", r.Name, "err", err)
+			continue
+		}
+		slog.Info("bootstrap: migration complete", "repo", r.Name)
+	}
+	slog.Info("bootstrap: pass complete")
 }
 
 // Status returns the current migration state for a repo.

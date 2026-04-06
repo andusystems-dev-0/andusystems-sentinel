@@ -184,6 +184,10 @@ type ForgejoProvider interface {
 // GitHubProvider wraps the GitHub API for the staging mirror.
 type GitHubProvider interface {
 	EnsureRepo(ctx context.Context, repoPath, description string) error
+	// IsEmpty reports whether the GitHub repo has zero commits (or does not
+	// exist). Used by the auto-bootstrap path to decide whether an initial
+	// migration is required.
+	IsEmpty(ctx context.Context, repoPath string) (bool, error)
 	PushFile(ctx context.Context, repoPath, filename, commitMsg string, content []byte) error
 	PushFiles(ctx context.Context, repoPath, commitMsg string, files map[string][]byte) error
 }

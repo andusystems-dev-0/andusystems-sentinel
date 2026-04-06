@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"strings"
 
 	gogithub "github.com/google/go-github/v66/github"
@@ -90,6 +91,27 @@ func (c *GitHubClient) EnsureRepo(ctx context.Context, repoPath, description str
 		return fmt.Errorf("create github mirror repo %s: %w", repoPath, err)
 	}
 	return nil
+}
+
+// IsEmpty reports whether the GitHub repo at repoPath contains zero commits,
+// or does not exist at all. Bootstrap uses this to decide whether an initial
+// Mode 4 migration is required.
+func (c *GitHubClient) IsEmpty(ctx context.Context, repoPath string) (bool, error) {
+	owner, name, err := c.githubPaths(repoPath)
+	if err != nil {
+		return false, err
+	}
+	_, resp, err := c.client.Repositories.ListCommits(ctx, owner, name,
+		&gogithub.CommitsListOptions{ListOptions: gogithub.ListOptions{PerPage: 1}})
+	if err == nil {
+		return false, nil
+	}
+	// GitHub returns 409 Conflict with "Git Repository is empty" for an
+	// existing-but-empty repo, and 404 if the repo doesn't exist.
+	if resp != nil && (resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusNotFound) {
+		return true, nil
+	}
+	return false, fmt.Errorf("list commits %s: %w", repoPath, err)
 }
 
 // PushFile creates or updates a single file in the GitHub mirror repo.

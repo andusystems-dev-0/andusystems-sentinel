@@ -26,6 +26,7 @@ type Config struct {
 	Allowlist  AllowlistConfig  `yaml:"allowlist"`
 	DocGen     DocGenConfig     `yaml:"doc_gen"`
 	Obsidian   ObsidianConfig   `yaml:"obsidian"`
+	Reconcile  ReconcileConfig  `yaml:"reconcile"`
 	Repos         []RepoConfig  `yaml:"repos"`
 	ExcludedRepos []string      `yaml:"excluded_repos"`
 }
@@ -131,6 +132,11 @@ type SanitizeConfig struct {
 	// any Ollama error, Layer 2 falls back to the [AI_ASSISTANT] API (if configured).
 	// Zero or negative uses the default of 60 seconds.
 	Layer2TimeoutSeconds int `yaml:"layer2_timeout_seconds"`
+	// Layer3Enabled controls whether the [AI_ASSISTANT] API safety-net pass runs on
+	// every file. When false, only Layer 1 (gitleaks) and Layer 2 (Ollama,
+	// with [AI_ASSISTANT] fallback on timeout) run. Disabling Layer 3 dramatically
+	// reduces [AI_ASSISTANT] usage — [AI_ASSISTANT] is then only called when Ollama fails.
+	Layer3Enabled bool `yaml:"layer3_enabled"`
 }
 
 // ScrubPattern defines a regex substitution applied to all file content
@@ -142,6 +148,18 @@ type ScrubPattern struct {
 
 type AllowlistConfig struct {
 	ConfirmationTTLMinutes int `yaml:"confirmation_ttl_minutes"`
+}
+
+// ReconcileConfig controls Forgejo→GitHub drift detection.
+// A webhook miss (daemon down, delivery failure) can leave GitHub behind
+// Forgejo. The reconciler closes that gap: on startup and on a ticker, it
+// compares each repo's Forgejo HEAD to sync_runs.last_sha and triggers
+// Mode 3 sync when they differ.
+type ReconcileConfig struct {
+	// OnStartup runs one pass as the daemon comes up.
+	OnStartup bool `yaml:"on_startup"`
+	// IntervalMinutes schedules a recurring drift pass; 0 disables.
+	IntervalMinutes int `yaml:"interval_minutes"`
 }
 
 // DocGenConfig controls documentation generation behaviour.
