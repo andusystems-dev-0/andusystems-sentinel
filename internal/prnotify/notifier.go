@@ -45,19 +45,26 @@ func NewNotifier(
 	}
 }
 
+func (n *Notifier) prChannelID() string {
+	if n.cfg.Discord.PRChannelID != "" {
+		return n.cfg.Discord.PRChannelID
+	}
+	return n.cfg.Discord.ActionsChannelID
+}
+
 // PostPRNotification posts a PR embed to the Discord PR channel and seeds reactions.
 // Returns the Discord message ID.
 func (n *Notifier) PostPRNotification(ctx context.Context, pr types.SentinelPR, summary string) (string, error) {
 	embed := discord.BuildPREmbed(pr, summary, n.cfg.PR)
 
 	session := n.bot.Session()
-	msg, err := session.ChannelMessageSendEmbed(n.cfg.Discord.PRChannelID, embed)
+	msg, err := session.ChannelMessageSendEmbed(n.prChannelID(), embed)
 	if err != nil {
 		return "", fmt.Errorf("post PR notification embed: %w", err)
 	}
 
 	// Seed reactions.
-	if err := n.bot.SeedPRReactions(ctx, n.cfg.Discord.PRChannelID, msg.ID); err != nil {
+	if err := n.bot.SeedPRReactions(ctx, n.prChannelID(), msg.ID); err != nil {
 		slog.Warn("seed PR reactions failed", "messageID", msg.ID, "err", err)
 	}
 
@@ -65,7 +72,7 @@ func (n *Notifier) PostPRNotification(ctx context.Context, pr types.SentinelPR, 
 	if n.cfg.PR.MentionOnSecurity && pr.PRType == "vulnerability" {
 		if n.mention.ShouldMention(ctx, pr.Repo) {
 			content := fmt.Sprintf("@here 🚨 New vulnerability PR in **%s** — please review.", pr.Repo)
-			n.bot.PostChannelMessage(ctx, n.cfg.Discord.PRChannelID, content)
+			n.bot.PostChannelMessage(ctx, n.prChannelID(), content)
 			n.mention.RecordMention(ctx, pr.Repo)
 		}
 	}
@@ -91,7 +98,7 @@ func (n *Notifier) HandleApprove(ctx context.Context, pr *types.SentinelPR, user
 
 	if err := n.forge.MergePR(ctx, pr.Repo, pr.PRNumber, strategy, n.cfg.Forgejo.OperatorToken); err != nil {
 		slog.Error("merge PR failed", "pr", pr.PRNumber, "repo", pr.Repo, "err", err)
-		n.bot.PostChannelMessage(ctx, n.cfg.Discord.PRChannelID,
+		n.bot.PostChannelMessage(ctx, n.prChannelID(),
 			fmt.Sprintf("⚠️ Failed to merge PR #%d in `%s` — token may be expired. Retry or merge in Forgejo UI.", pr.PRNumber, pr.Repo))
 		return err
 	}
@@ -100,8 +107,12 @@ func (n *Notifier) HandleApprove(ctx context.Context, pr *types.SentinelPR, user
 		return err
 	}
 
+	ts := time.Now().Format("15:04 MST")
 	n.bot.EditPRFooter(ctx, pr.DiscordChannelID, pr.DiscordMessageID,
-		fmt.Sprintf("✅ Merged by <@%s> · %s", userID, time.Now().Format("15:04 MST")))
+		fmt.Sprintf("✅ Merged by <@%s> · %s", userID, ts))
+	n.bot.PostChannelMessage(ctx, n.prChannelID(),
+		fmt.Sprintf("✅ **PR #%d** merged in **%s** — `%s` → `main` · <@%s> · %s\n*GitHub mirror will sync shortly.*",
+			pr.PRNumber, pr.Repo, pr.Branch, userID, ts))
 
 	n.actions.Log(ctx, "pr_merged", pr.Repo, pr.ID,
 		fmt.Sprintf(`{"pr_number":%d,"merged_by":"%s"}`, pr.PRNumber, userID))
@@ -173,15 +184,17 @@ func (n *Notifier) HandleForgejoResolution(ctx context.Context, repo string, prN
 		n.prStore.MarkMerged(ctx, pr.ID, "forgejo-ui")
 		n.bot.EditPRFooter(ctx, pr.DiscordChannelID, pr.DiscordMessageID,
 			fmt.Sprintf("✅ Merged in Forgejo · %s", ts))
-		n.bot.PostChannelMessage(ctx, pr.DiscordChannelID,
-			fmt.Sprintf("ℹ️  PR #%d in %s was merged directly in Forgejo · %s", prNumber, repo, ts))
+		n.bot.PostChannelMessage(ctx, n.prChannelID(),
+			fmt.Sprintf("✅ **PR #%d** merged in **%s** — `%s` → `main` · via Forgejo UI · %s\n*GitHub mirror will sync shortly.*",
+				prNumber, repo, pr.Branch, ts))
 		n.actions.Log(ctx, "forgejo_sync_merged", repo, pr.ID, fmt.Sprintf(`{"pr_number":%d}`, prNumber))
 	} else {
 		n.prStore.MarkClosed(ctx, pr.ID, "forgejo-ui")
 		n.bot.EditPRFooter(ctx, pr.DiscordChannelID, pr.DiscordMessageID,
 			fmt.Sprintf("❌ Closed in Forgejo · %s", ts))
-		n.bot.PostChannelMessage(ctx, pr.DiscordChannelID,
-			fmt.Sprintf("ℹ️  PR #%d in %s was closed directly in Forgejo · %s", prNumber, repo, ts))
+		n.bot.PostChannelMessage(ctx, n.prChannelID(),
+			fmt.Sprintf("❌ **PR #%d** closed in **%s** — `%s` · via Forgejo UI · %s",
+				prNumber, repo, pr.Branch, ts))
 		n.actions.Log(ctx, "forgejo_sync_closed", repo, pr.ID, fmt.Sprintf(`{"pr_number":%d}`, prNumber))
 	}
 

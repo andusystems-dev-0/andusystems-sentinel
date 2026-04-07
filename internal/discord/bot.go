@@ -175,10 +175,10 @@ func (b *Bot) PostInThread(_ context.Context, threadID, content string) error {
 	return err
 }
 
-// PostNightlyDigest posts the nightly digest embed to the actions channel.
+// PostNightlyDigest posts the nightly digest embed to the PR channel.
 func (b *Bot) PostNightlyDigest(_ context.Context, digest types.NightlyDigest) error {
 	embed := BuildDigestEmbed(digest, b.cfg.Digest.LowPriorityCollapseThreshold)
-	_, err := b.session.ChannelMessageSendEmbed(b.cfg.Discord.ActionsChannelID, embed)
+	_, err := b.session.ChannelMessageSendEmbed(b.prCh(), embed)
 	return err
 }
 
@@ -204,16 +204,18 @@ func (b *Bot) onReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAd
 		return
 	}
 
-	// Actions channel: PR reactions (✅/❌/💬) and confirmation reactions (✅/❌).
-	if r.ChannelID == b.cfg.Discord.ActionsChannelID {
-		// Try PR handlers first.
+	// PR channel: PR reactions (✅/❌/💬).
+	if r.ChannelID == b.prCh() {
 		if h, ok := b.prHandlers[emoji]; ok {
 			if err := h.Handle(ctx, r.MessageID, r.UserID); err != nil {
 				slog.Error("PR reaction handler error", "emoji", emoji, "err", err)
 			}
 		}
-		// Try confirmation handlers (migration confirm/reject).
-		// SetStatusByMessageID is a no-op if the message is not a confirmation.
+		return
+	}
+
+	// Actions channel: confirmation reactions (✅/❌) for migrations.
+	if r.ChannelID == b.cfg.Discord.ActionsChannelID {
 		if b.confirmations != nil && b.IsOperator(r.UserID) {
 			switch emoji {
 			case "✅":
@@ -239,6 +241,14 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+// prCh returns the PR channel ID, falling back to actions channel if not set.
+func (b *Bot) prCh() string {
+	if b.cfg.Discord.PRChannelID != "" {
+		return b.cfg.Discord.PRChannelID
+	}
+	return b.cfg.Discord.ActionsChannelID
+}
 
 func (b *Bot) editEmbedFooter(channelID, messageID, footer string) error {
 	msg, err := b.session.ChannelMessage(channelID, messageID)

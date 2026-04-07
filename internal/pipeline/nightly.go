@@ -455,9 +455,93 @@ func (r *NightlyRunner) executeTask(ctx context.Context, repoName string, task *
 		return fmt.Errorf("[AI_ASSISTANT] code task %s: %s", task.ID, errMsg)
 	}
 
-	// PR is opened by the webhook push handler (Branch B flow).
 	r.db.Tasks.SetStatus(ctx, task.ID, "complete")
 	r.db.Tasks.SetVerification(ctx, task.ID, "passed", "")
+
+	// Create the PR directly instead of waiting for a webhook roundtrip.
+	if err := r.openPR(ctx, repoName, task, spec); err != nil {
+		slog.Error("nightly: PR creation failed", "repo", repoName, "branch", branch, "err", err)
+		// Task succeeded even if PR creation fails — the branch exists on Forgejo.
+	}
+
+	return nil
+}
+
+// openPR creates a Forgejo PR and posts the notification to the sentinel-prs Discord channel.
+func (r *NightlyRunner) openPR(ctx context.Context, repoName string, task *store.Task, spec types.TaskSpec) error {
+	prType := TaskTypeToPRType(spec.Type)
+	prTitle := PRTitleFor(spec)
+	tier := PriorityTier(prType, r.cfg.PR.HighPriorityTypes)
+
+	// Build a structured PR body.
+	var body strings.Builder
+	body.WriteString("## Summary\n")
+	body.WriteString(task.Description)
+	body.WriteString("\n")
+	if len(task.AffectedFiles) > 0 {
+		body.WriteString("\n## Affected Files\n")
+		for _, f := range task.AffectedFiles {
+			body.WriteString("- `" + f + "`\n")
+		}
+	}
+	if len(task.Acceptance) > 0 {
+		body.WriteString("\n## Acceptance Criteria\n")
+		for _, c := range task.Acceptance {
+			body.WriteString("- " + c + "\n")
+		}
+	}
+	body.WriteString(fmt.Sprintf("\n---\n*Type: `%s` | Complexity: `%s` | Executor: `%s`*\n",
+		task.TaskType, task.Complexity, task.Executor))
+
+	prBody := body.String()
+
+	prNumber, prURL, err := r.forge.CreatePR(ctx, types.OpenPROptions{
+		Repo:         repoName,
+		Branch:       task.Branch,
+		BaseBranch:   "main",
+		Title:        prTitle,
+		Body:         prBody,
+		PRType:       prType,
+		PriorityTier: tier,
+	})
+	if err != nil {
+		return fmt.Errorf("create PR for %s: %w", task.Branch, err)
+	}
+
+	prChID := r.cfg.Discord.PRChannelID
+	if prChID == "" {
+		prChID = r.cfg.Discord.ActionsChannelID
+	}
+
+	pr := types.SentinelPR{
+		ID:               newID(),
+		Repo:             repoName,
+		PRNumber:         prNumber,
+		PRUrl:            prURL,
+		Branch:           task.Branch,
+		BaseBranch:       "main",
+		Title:            prTitle,
+		PRType:           prType,
+		PriorityTier:     tier,
+		Status:           types.PRStatusOpen,
+		OpenedAt:         time.Now(),
+		TaskID:           task.ID,
+		DiscordChannelID: prChID,
+	}
+
+	msgID, err := r.notifier.PostPRNotification(ctx, pr, prBody)
+	if err != nil {
+		slog.Error("nightly: post PR notification failed", "repo", repoName, "pr", prNumber, "err", err)
+	}
+	pr.DiscordMessageID = msgID
+
+	if err := r.db.PRs.Create(ctx, pr); err != nil {
+		return fmt.Errorf("save PR record: %w", err)
+	}
+
+	r.db.Tasks.SetPRNumber(ctx, task.ID, prNumber)
+
+	slog.Info("nightly: PR opened", "repo", repoName, "branch", task.Branch, "pr", prNumber)
 	return nil
 }
 

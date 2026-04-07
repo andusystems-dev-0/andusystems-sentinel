@@ -58,11 +58,12 @@ type GitHubConfig struct {
 }
 
 type DiscordConfig struct {
-	GuildID          string   `yaml:"guild_id"`
-	PRChannelID      string   `yaml:"pr_channel_id"`
-	FindingsChannelID string  `yaml:"findings_channel_id"`
-	CommandChannelID string   `yaml:"command_channel_id"`
-	OperatorUserIDs  []string `yaml:"operator_user_ids"`
+	GuildID           string   `yaml:"guild_id"`
+	ActionsChannelID  string   `yaml:"actions_channel_id"`
+	PRChannelID       string   `yaml:"pr_channel_id"`
+	LogsChannelID     string   `yaml:"logs_channel_id"`
+	GitLogsChannelID  string   `yaml:"git_logs_channel_id"`
+	OperatorUserIDs   []string `yaml:"operator_user_ids"`
 	// Token resolved from env: DISCORD_BOT_TOKEN
 	BotToken string `yaml:"-"`
 }
@@ -82,8 +83,9 @@ type HousekeepingConfig struct {
 
 type NightlyConfig struct {
 	Cron                      string `yaml:"cron"`
-	SkipIfActiveDevWithinHours int   `yaml:"skip_if_active_dev_within_hours"`
-	FloodThreshold            int    `yaml:"flood_threshold"`
+	SkipIfActiveDevWithinHours int `yaml:"skip_if_active_dev_within_hours"`
+	FloodThreshold             int `yaml:"flood_threshold"`
+	SessionBudgetMinutes       int `yaml:"session_budget_minutes"`
 }
 
 type DigestConfig struct {
@@ -95,7 +97,6 @@ type WebhookConfig struct {
 	Port              int    `yaml:"port"`
 	EventQueueSize    int    `yaml:"event_queue_size"`
 	ProcessingWorkers int    `yaml:"processing_workers"`
-	ReviewCooldownMinutes int `yaml:"review_cooldown_minutes"`
 	// Secret resolved from env: FORGEJO_WEBHOOK_SECRET
 	Secret string `yaml:"-"`
 }
@@ -256,8 +257,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.Webhook.ProcessingWorkers == 0 {
 		cfg.Webhook.ProcessingWorkers = 4
 	}
-	if cfg.Webhook.ReviewCooldownMinutes == 0 {
-		cfg.Webhook.ReviewCooldownMinutes = 5
+	if cfg.Nightly.SessionBudgetMinutes == 0 {
+		cfg.Nightly.SessionBudgetMinutes = 60
 	}
 	if cfg.Ollama.ContextWindow == 0 {
 		cfg.Ollama.ContextWindow = 16384

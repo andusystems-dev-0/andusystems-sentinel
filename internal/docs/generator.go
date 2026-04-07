@@ -31,6 +31,13 @@ type Generator struct {
 	prStore  types.SentinelPRStore
 }
 
+func (g *Generator) prChannelID() string {
+	if g.cfg.Discord.PRChannelID != "" {
+		return g.cfg.Discord.PRChannelID
+	}
+	return g.cfg.Discord.ActionsChannelID
+}
+
 // NewGenerator creates a documentation Generator.
 func NewGenerator(
 	cfg *config.Config,
@@ -202,7 +209,7 @@ func (g *Generator) notifyPR(ctx context.Context, repoName string, prNum int, pr
 		Status:           types.PRStatusOpen,
 		OpenedAt:         time.Now(),
 		TaskID:           taskID,
-		DiscordChannelID: g.cfg.Discord.PRChannelID,
+		DiscordChannelID: g.prChannelID(),
 	}
 
 	summary := fmt.Sprintf("Documentation generated for **%s**.\nReact ✅ to merge or ❌ to close.", repoName)

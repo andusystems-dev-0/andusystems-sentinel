@@ -447,7 +447,7 @@ func (d *pushEventDispatch) HandlePushEvent(ctx context.Context, event types.For
 		Status:           types.PRStatusOpen,
 		OpenedAt:         time.Now(),
 		TaskID:           task.ID,
-		DiscordChannelID: d.cfg.Discord.ActionsChannelID,
+		DiscordChannelID: prChannelID(d.cfg),
 	}
 
 	msgID, err := d.notifier.PostPRNotification(ctx, pr, prBody)
@@ -492,6 +492,14 @@ func parsePushBranch(payload []byte) string {
 		return ""
 	}
 	return strings.TrimPrefix(p.Ref, "refs/heads/")
+}
+
+// prChannelID returns the PR channel, falling back to actions channel if not set.
+func prChannelID(cfg *config.Config) string {
+	if cfg.Discord.PRChannelID != "" {
+		return cfg.Discord.PRChannelID
+	}
+	return cfg.Discord.ActionsChannelID
 }
 
 // buildPRBody constructs a well-formatted PR description from task metadata.

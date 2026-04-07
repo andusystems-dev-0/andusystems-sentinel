@@ -3,10 +3,13 @@ package worktree
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 
 	gogit "github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 
@@ -59,13 +62,15 @@ func (m *Manager) EnsureForgejoWorktree(ctx context.Context, repo string) error 
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir forgejo worktree %s: %w", dir, err)
 		}
-		_, err := gogit.PlainCloneContext(ctx, dir, false, &gogit.CloneOptions{
+		clonedRepo, err := gogit.PlainCloneContext(ctx, dir, false, &gogit.CloneOptions{
 			URL:  cloneURL,
 			Auth: auth,
 		})
 		if err != nil {
 			return fmt.Errorf("clone %s: %w", cloneURL, err)
 		}
+		// Set authenticated remote URL for [AI_ASSISTANT] Code shell pushes.
+		m.ensureAuthenticatedRemote(clonedRepo, repo, repoConfig)
 		return nil
 	}
 
@@ -124,6 +129,11 @@ func (m *Manager) EnsureForgejoWorktree(ctx context.Context, repo string) error 
 	}); err != nil {
 		return fmt.Errorf("hard reset %s to origin/%s: %w", repo, defaultBranch, err)
 	}
+
+	// Ensure the origin remote URL includes credentials so that [AI_ASSISTANT] Code
+	// (which runs git push as a shell command) can authenticate.
+	m.ensureAuthenticatedRemote(r, repo, repoConfig)
+
 	return nil
 }
 
@@ -220,6 +230,36 @@ func (m *Manager) repoConfig(repo string) *config.RepoConfig {
 		}
 	}
 	return nil
+}
+
+// ensureAuthenticatedRemote updates the origin remote URL to include the
+// sentinel token so that shell-level git push (used by [AI_ASSISTANT] Code) can
+// authenticate without a credential helper.
+func (m *Manager) ensureAuthenticatedRemote(r *gogit.Repository, repo string, repoConfig *config.RepoConfig) {
+	baseURL := m.cfg.Forgejo.BaseURL
+	token := m.cfg.Forgejo.SentinelToken
+	username := m.cfg.Sentinel.ForgejoUsername
+	if token == "" || username == "" {
+		return
+	}
+
+	// Build URL with embedded credentials: https://user:token@host/path.git
+	parsed, err := url.Parse(fmt.Sprintf("%s/%s.git", baseURL, repoConfig.ForgejoPath))
+	if err != nil {
+		slog.Debug("ensureAuthenticatedRemote: parse URL failed", "repo", repo, "err", err)
+		return
+	}
+	parsed.User = url.UserPassword(username, token)
+	authURL := parsed.String()
+
+	// Delete and recreate origin with the authenticated URL.
+	_ = r.DeleteRemote("origin")
+	if _, err := r.CreateRemote(&gitconfig.RemoteConfig{
+		Name: "origin",
+		URLs: []string{authURL},
+	}); err != nil {
+		slog.Debug("ensureAuthenticatedRemote: create remote failed", "repo", repo, "err", err)
+	}
 }
 
 // ForgejoDir returns the Forgejo worktree directory path for a repo (used by pipeline/sync).
