@@ -19,6 +19,11 @@ Base branch: {{.BaseBranch}}
 
 ## Description
 {{.Description}}
+{{- if .ImplementationPlan}}
+
+## Implementation Plan
+{{.ImplementationPlan}}
+{{- end}}
 
 ## Affected Files
 {{range .AffectedFiles}}- {{.}}
@@ -28,14 +33,29 @@ Base branch: {{.BaseBranch}}
 {{range .AcceptanceCriteria}}- {{.}}
 {{end}}
 
+## Documentation
+If your changes affect behavior, APIs, configuration, or architecture, update the
+relevant documentation in the SAME commit. This includes:
+- README.md sections that describe changed functionality
+- Inline code comments for non-obvious logic you added or changed
+- CHANGELOG.md — append a brief entry under ## [Unreleased] describing your change
+Do NOT create separate documentation PRs. Keep doc updates minimal and relevant.
+
 ## Scope Boundary
-- Only change files listed in "Affected Files" above.
+- You may change files beyond "Affected Files" if needed for the implementation or documentation.
 - Do NOT modify {{.BaseBranch}} directly.
 - Do NOT commit to any existing branch other than {{.BranchName}}.
 - Do NOT open a pull request — sentinel will open it after your push.
 - Do NOT merge any branch.
 - Do NOT call external APIs or services.
 - Do NOT read files outside this repository's worktree.
+
+## Verification
+After making changes, run these commands and fix any issues before committing:
+  make test
+  make lint
+If either command fails, fix the issues and retry before pushing.
+If the repository does not have a Makefile, skip this step.
 
 ## PR Instructions
 - Title (for reference only — sentinel will set this): {{.PRTitle}}
@@ -55,6 +75,7 @@ type taskTemplateData struct {
 	BranchName         string
 	BaseBranch         string
 	Description        string
+	ImplementationPlan string
 	AffectedFiles      []string
 	AcceptanceCriteria []string
 	PRTitle            string
@@ -63,7 +84,7 @@ type taskTemplateData struct {
 }
 
 // RenderTaskSpec renders the task specification string for [AI_ASSISTANT] Code stdin.
-func RenderTaskSpec(spec types.TaskSpec, branch, baseBranch, prTitle string, cfg *config.Config) (string, error) {
+func RenderTaskSpec(spec types.TaskSpec, repo, branch, baseBranch, prTitle string, cfg *config.Config) (string, error) {
 	tmpl, err := template.New("task").Parse(taskSpecTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse task template: %w", err)
@@ -71,10 +92,11 @@ func RenderTaskSpec(spec types.TaskSpec, branch, baseBranch, prTitle string, cfg
 
 	data := taskTemplateData{
 		ID:                 spec.ID,
-		Repo:               spec.AffectedFiles[0], // repo is implicit from worktree path
+		Repo:               repo,
 		BranchName:         branch,
 		BaseBranch:         baseBranch,
 		Description:        spec.Description,
+		ImplementationPlan: spec.ImplementationPlan,
 		AffectedFiles:      spec.AffectedFiles,
 		AcceptanceCriteria: spec.AcceptanceCriteria,
 		PRTitle:            prTitle,
@@ -98,7 +120,19 @@ Branch: {{.BranchName}}
 Base branch: {{.BaseBranch}}
 
 ## Documentation Targets
-Generate or update the following files. Create parent directories as needed.
+You MUST create or update ALL of the following files — no exceptions. Create parent
+directories as needed.
+
+For each target:
+1. If the file does NOT exist, create it from scratch with comprehensive content.
+2. If the file ALREADY exists, read it thoroughly, then rewrite/expand it so it reflects
+   the current state of the codebase. Do not leave stale or incomplete sections. Update
+   everything — structure, content, examples, configuration references.
+
+Do not skip a target just because a file already exists. Every target must be touched
+in this commit.
+
+Targets:
 {{range .DocTargets}}- {{.}}
 {{end}}
 ## Source Context

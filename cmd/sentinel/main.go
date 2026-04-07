@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/robfig/cron/v3"
 
+	sentinelapi "github.com/andusystems/sentinel/internal/api"
 	"github.com/andusystems/sentinel/internal/[AI_ASSISTANT]"
 	"github.com/andusystems/sentinel/internal/config"
 	"github.com/andusystems/sentinel/internal/discord"
@@ -35,6 +37,7 @@ import (
 	"github.com/andusystems/sentinel/internal/types"
 	"github.com/andusystems/sentinel/internal/webhook"
 	"github.com/andusystems/sentinel/internal/worktree"
+	"github.com/andusystems/sentinel/web"
 )
 
 func main() {
@@ -153,7 +156,8 @@ func main() {
 	changelogMgr := docs.NewChangelogManager(cfg, db, wt, wtLock, llmClient, forgejoClient)
 
 	// ---- Nightly pipeline ---------------------------------------------------
-	nightlyRunner := pipeline.NewNightlyRunner(cfg, db, wt, wtLock, batcher, taskExecutor, forgejoClient, notifier, docGen, changelogMgr)
+	nightlyRunner := pipeline.NewNightlyRunner(cfg, db, wt, wtLock, batcher, taskExecutor, forgejoClient, notifier, bot, docGen, changelogMgr)
+	bot.SetNightlyRunner(nightlyRunner)
 
 	// ---- Sync handler (Forgejo→Discord) --------------------------------------
 	syncHandler := prnotify.NewSyncHandler(notifier, db.PRs, db.Actions, syncRunner)
@@ -224,7 +228,13 @@ func main() {
 
 	case "nightly":
 		if *targetRepo != "" {
-			if err := nightlyRunner.Run(ctx, *targetRepo); err != nil {
+			var err error
+			if *force {
+				err = nightlyRunner.RunFull(ctx, *targetRepo)
+			} else {
+				err = nightlyRunner.Run(ctx, *targetRepo)
+			}
+			if err != nil {
 				slog.Error("nightly run failed", "repo", *targetRepo, "err", err)
 				os.Exit(1)
 			}
@@ -287,8 +297,25 @@ func main() {
 	// Start webhook event processor in background.
 	go processor.Start(ctx)
 
-	// Start webhook HTTP server in background.
-	server := webhook.NewServer(cfg.Webhook.Port, queue, cfg.Webhook.Secret)
+	// ---- HTTP mux: webhooks + API + SPA -------------------------------------
+	mux := http.NewServeMux()
+
+	webhookHandler := webhook.NewHandler(queue, cfg.Webhook.Secret)
+	mux.HandleFunc("POST /webhooks/forgejo", webhookHandler.ServeHTTP)
+	mux.HandleFunc("GET /health", webhook.HealthHandler)
+	mux.HandleFunc("GET /ready", webhook.HealthHandler)
+
+	eventBus := sentinelapi.NewEventBus()
+	apiServer := sentinelapi.NewServer(db, cfg, eventBus)
+	apiServer.RegisterRoutes(mux)
+	mux.Handle("GET /", sentinelapi.SPAHandler(web.Assets))
+
+	// Inject event publisher into nightly runner for SSE.
+	nightlyRunner.SetEventPublisher(func(eventType string, data any) {
+		eventBus.Publish(sentinelapi.Event{Type: eventType, Data: data})
+	})
+
+	server := webhook.NewServer(cfg.Webhook.Port, mux)
 	go func() {
 		if err := server.Start(); err != nil {
 			slog.Error("webhook server error", "err", err)
@@ -389,6 +416,7 @@ func (d *pushEventDispatch) HandlePushEvent(ctx context.Context, event types.For
 	prType := pipeline.TaskTypeToPRType(task.TaskType)
 	prTitle := pipeline.PRTitleFor(types.TaskSpec{Type: task.TaskType, Title: task.Title})
 	tier := pipeline.PriorityTier(prType, d.cfg.PR.HighPriorityTypes)
+	prBody := buildPRBody(task)
 
 	// Open the PR on Forgejo.
 	prNumber, prURL, err := d.forge.CreatePR(ctx, types.OpenPROptions{
@@ -396,7 +424,7 @@ func (d *pushEventDispatch) HandlePushEvent(ctx context.Context, event types.For
 		Branch:       branch,
 		BaseBranch:   "main",
 		Title:        prTitle,
-		Body:         task.Description,
+		Body:         prBody,
 		PRType:       prType,
 		PriorityTier: tier,
 	})
@@ -419,10 +447,10 @@ func (d *pushEventDispatch) HandlePushEvent(ctx context.Context, event types.For
 		Status:           types.PRStatusOpen,
 		OpenedAt:         time.Now(),
 		TaskID:           task.ID,
-		DiscordChannelID: d.cfg.Discord.PRChannelID,
+		DiscordChannelID: d.cfg.Discord.ActionsChannelID,
 	}
 
-	msgID, err := d.notifier.PostPRNotification(ctx, pr, task.Description)
+	msgID, err := d.notifier.PostPRNotification(ctx, pr, prBody)
 	if err != nil {
 		slog.Error("push handler: post PR notification", "repo", event.Repo, "pr", prNumber, "err", err)
 		// PR is open on Forgejo — save the DB record anyway so reactions can still be handled.
@@ -464,6 +492,35 @@ func parsePushBranch(payload []byte) string {
 		return ""
 	}
 	return strings.TrimPrefix(p.Ref, "refs/heads/")
+}
+
+// buildPRBody constructs a well-formatted PR description from task metadata.
+func buildPRBody(task *store.Task) string {
+	var sb strings.Builder
+
+	sb.WriteString("## Summary\n")
+	sb.WriteString(task.Description)
+	sb.WriteString("\n")
+
+	if len(task.AffectedFiles) > 0 {
+		sb.WriteString("\n## Affected Files\n")
+		for _, f := range task.AffectedFiles {
+			sb.WriteString("- `" + f + "`\n")
+		}
+	}
+
+	if len(task.Acceptance) > 0 {
+		sb.WriteString("\n## Acceptance Criteria\n")
+		for _, c := range task.Acceptance {
+			sb.WriteString("- " + c + "\n")
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("\n---\n*Type: `%s` | Complexity: `%s` | Executor: `%s`*\n",
+		task.TaskType, task.Complexity, task.Executor))
+	sb.WriteString("*Generated by [Sentinel](https://github.com/andusystems-dev-0/andusystems-sentinel-app)*\n")
+
+	return sb.String()
 }
 
 // syncGitHubDescription ensures the GitHub repo description matches the config.

@@ -406,20 +406,8 @@ func (r *NightlyRunner) RunWithOpts(ctx context.Context, repoName string, fullSc
 		fmt.Sprintf(`{"tasks":%d,"completed":%d,"failed":%d}`,
 			session.TasksPlanned, session.TasksCompleted, session.TasksFailed))
 
-	// Doc generation (non-blocking, lower priority — runs only if time remains).
-	elapsed := time.Since(sessionStart)
-	if int(elapsed.Minutes()) < budget {
-		if r.docGen != nil {
-			if err := r.docGen.UpdateStale(ctx, repoName, currentSHA); err != nil {
-				slog.Warn("nightly: doc-gen update failed", "repo", repoName, "err", err)
-			}
-		}
-		if r.changelog != nil {
-			if err := r.changelog.UpdateChangelog(ctx, repoName, lastSHA, currentSHA); err != nil {
-				slog.Warn("nightly: changelog update failed", "repo", repoName, "err", err)
-			}
-		}
-	}
+	// Doc/changelog updates are now included in each task's PR by the [AI_ASSISTANT]
+	// Code template — no separate doc-gen or changelog pass needed.
 
 	finishSession("complete")
 	slog.Info("nightly pipeline complete", "repo", repoName,

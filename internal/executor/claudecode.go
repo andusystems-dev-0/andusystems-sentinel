@@ -38,7 +38,7 @@ func (e *TaskExecutor) Execute(ctx context.Context, spec types.TaskSpec, branch,
 
 	prTitle := buildPRTitle(spec)
 
-	taskText, err := RenderTaskSpec(spec, branch, baseBranch, prTitle, e.cfg)
+	taskText, err := RenderTaskSpec(spec, repo, branch, baseBranch, prTitle, e.cfg)
 	if err != nil {
 		return &types.TaskResult{Error: err.Error()}, err
 	}
@@ -47,9 +47,14 @@ func (e *TaskExecutor) Execute(ctx context.Context, spec types.TaskSpec, branch,
 	binary := e.cfg.ClaudeCode.BinaryPath
 	args := append(e.cfg.ClaudeCode.Flags, "--print") // "--print" reads from stdin
 
-	timeout := time.Duration(e.cfg.ClaudeCode.TaskTimeoutMinutes) * time.Minute
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Use existing context deadline if set (e.g. from pipeline budget system),
+	// otherwise fall back to the static config timeout.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeout := time.Duration(e.cfg.ClaudeCode.TaskTimeoutMinutes) * time.Minute
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Stdin = strings.NewReader(taskText)
