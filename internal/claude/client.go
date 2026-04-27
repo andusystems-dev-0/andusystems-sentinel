@@ -1,12 +1,12 @@
-// Package [AI_ASSISTANT] implements types.ClaudeAPIClient by shelling out to the
-// [AI_ASSISTANT] Code CLI. Sentinel uses this for:
+// Package claude implements types.ClaudeAPIClient by shelling out to the
+// Claude Code CLI. Sentinel uses this for:
 //   - Layer 3 sanitization safety-net pass
 //   - Layer 2 fallback when Ollama times out or fails
 //
-// Only the [AI_ASSISTANT] Code CLI is invoked here — no direct [AI_PROVIDER] API calls.
-// All invocations share the global [AI_ASSISTANT] Code semaphore (executor package),
+// Only the Claude Code CLI is invoked here — no direct Anthropic API calls.
+// All invocations share the global Claude Code semaphore (executor package),
 // so CLI subprocesses never run concurrently.
-package [AI_ASSISTANT]
+package claude
 
 import (
 	"bytes"
@@ -23,14 +23,14 @@ import (
 	"github.com/andusystems/sentinel/internal/types"
 )
 
-// Client implements types.ClaudeAPIClient by invoking the [AI_ASSISTANT] Code CLI.
+// Client implements types.ClaudeAPIClient by invoking the Claude Code CLI.
 type Client struct {
 	binary    string
 	baseFlags []string
 	timeout   time.Duration
 }
 
-// NewClient builds a client that runs the [AI_ASSISTANT] Code binary at binaryPath
+// NewClient builds a client that runs the Claude Code binary at binaryPath
 // with the given base flags (e.g. --output-format=json). requestTimeout
 // bounds a single CLI invocation.
 func NewClient(binaryPath string, baseFlags []string, requestTimeout time.Duration) *Client {
@@ -42,7 +42,7 @@ func NewClient(binaryPath string, baseFlags []string, requestTimeout time.Durati
 	return &Client{binary: binaryPath, baseFlags: flags, timeout: requestTimeout}
 }
 
-// SanitizeChunk runs [AI_ASSISTANT] Code with the Role D system prompt and the file
+// SanitizeChunk runs Claude Code with the Role D system prompt and the file
 // content as the user prompt. Output is the JSON array of findings.
 func (c *Client) SanitizeChunk(ctx context.Context, content string) ([]types.SanitizationFinding, error) {
 	executor.AcquireClaudeCode()
@@ -51,7 +51,7 @@ func (c *Client) SanitizeChunk(ctx context.Context, content string) ([]types.San
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	// Build the prompt: Role D system prompt + user content. [AI_ASSISTANT] Code in
+	// Build the prompt: Role D system prompt + user content. Claude Code in
 	// --print mode expects a single combined prompt; there's no --system
 	// flag in this version of the CLI.
 	var prompt strings.Builder
@@ -66,17 +66,18 @@ func (c *Client) SanitizeChunk(ctx context.Context, content string) ([]types.San
 
 	cmd := exec.CommandContext(callCtx, c.binary, args...)
 	cmd.Stdin = strings.NewReader(prompt.String())
+	cmd.Env = executor.SubprocessEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("[AI_ASSISTANT] code cli: %v (stderr: %s)", err, truncate(stderr.String(), 500))
+		return nil, fmt.Errorf("claude code cli: %v (stderr: %s)", err, truncate(stderr.String(), 500))
 	}
 
 	resultText, err := extractResultText(stdout.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("parse [AI_ASSISTANT] code output: %w", err)
+		return nil, fmt.Errorf("parse claude code output: %w", err)
 	}
 	if resultText == "" {
 		return nil, nil
@@ -84,13 +85,13 @@ func (c *Client) SanitizeChunk(ctx context.Context, content string) ([]types.San
 
 	findings, err := extractFindings(resultText)
 	if err != nil {
-		slog.Warn("[AI_ASSISTANT] code: malformed JSON array", "err", err)
+		slog.Warn("claude code: malformed JSON array", "err", err)
 		return nil, nil
 	}
 	return findings, nil
 }
 
-// extractResultText reads the [AI_ASSISTANT] Code --output-format=json envelope and
+// extractResultText reads the Claude Code --output-format=json envelope and
 // returns the .result field. Falls back to the raw stdout if the envelope
 // isn't a structured JSON object (e.g. non-JSON output-format).
 func extractResultText(stdout []byte) (string, error) {
@@ -108,7 +109,7 @@ func extractResultText(stdout []byte) (string, error) {
 		}
 		if err := json.Unmarshal(trimmed, &env); err == nil {
 			if env.IsError {
-				return "", fmt.Errorf("[AI_ASSISTANT] code reported error: %s", truncate(env.Result, 500))
+				return "", fmt.Errorf("claude code reported error: %s", truncate(env.Result, 500))
 			}
 			return env.Result, nil
 		}
