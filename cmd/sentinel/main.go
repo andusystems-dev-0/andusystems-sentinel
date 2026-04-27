@@ -20,7 +20,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	sentinelapi "github.com/andusystems/sentinel/internal/api"
-	"github.com/andusystems/sentinel/internal/[AI_ASSISTANT]"
+	"github.com/andusystems/sentinel/internal/claude"
 	"github.com/andusystems/sentinel/internal/config"
 	"github.com/andusystems/sentinel/internal/discord"
 	"github.com/andusystems/sentinel/internal/docs"
@@ -44,7 +44,7 @@ func main() {
 	// ---- Flags ---------------------------------------------------------------
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	dryRun := flag.Bool("dry-run", false, "Dry run: no PRs, no GitHub pushes")
-	mode := flag.String("mode", "run", "Mode: run | sync | migrate | nightly")
+	mode := flag.String("mode", "run", "Mode: run | sync | migrate | nightly | doc-gen | init-sync-state")
 	targetRepo := flag.String("repo", "", "Target repo (for sync/migrate/dry-run modes)")
 	force := flag.Bool("force", false, "Force mode (for migrate)")
 	flag.Parse()
@@ -102,12 +102,12 @@ func main() {
 	batcher := llm.NewBatcher(llmClient, cfg)
 
 	// ---- Sanitization pipeline -----------------------------------------------
-	// [AI_ASSISTANT] Code CLI is the backend for both Layer 3 and the Layer 2
-	// fallback. We do NOT make direct [AI_PROVIDER] API calls from Go — the CLI
+	// Claude Code CLI is the backend for both Layer 3 and the Layer 2
+	// fallback. We do NOT make direct Anthropic API calls from Go — the CLI
 	// handles its own authentication (subscription or ANTHROPIC_API_KEY).
 	var claudeAPI types.ClaudeAPIClient
 	if cfg.ClaudeCode.BinaryPath != "" {
-		claudeAPI = [AI_ASSISTANT].NewClient(
+		claudeAPI = claude.NewClient(
 			cfg.ClaudeCode.BinaryPath,
 			cfg.ClaudeCode.Flags,
 			0, // default CLI timeout (2m)
@@ -240,6 +240,57 @@ func main() {
 			}
 		} else {
 			nightlyRunner.RunAll(ctx)
+		}
+		return
+
+	case "init-sync-state":
+		// Seed repo_sync_state with the current Forgejo HEAD SHA so Mode 3
+		// sync treats existing GitHub history as the baseline and only
+		// processes future commits. Skips any repo that already has state
+		// (e.g. those that have been migrated). Use --force to overwrite.
+		repos := cfg.Repos
+		if *targetRepo != "" {
+			var only []config.RepoConfig
+			for _, r := range cfg.Repos {
+				if r.Name == *targetRepo {
+					only = append(only, r)
+					break
+				}
+			}
+			if len(only) == 0 {
+				fmt.Fprintf(os.Stderr, "error: repo %q not found in config\n", *targetRepo)
+				os.Exit(1)
+			}
+			repos = only
+		}
+		for _, r := range repos {
+			if r.Excluded {
+				continue
+			}
+			existing, _ := db.SyncRuns.GetRepoSyncSHA(ctx, r.Name)
+			if existing != "" && !*force {
+				slog.Info("init-sync-state: skip (already initialized)", "repo", r.Name, "sha", existing)
+				continue
+			}
+			var sha string
+			var err error
+			for _, branch := range []string{"main", "master", "develop", "trunk"} {
+				sha, err = forgejoClient.GetHeadSHA(ctx, r.Name, branch)
+				if err == nil {
+					slog.Info("init-sync-state: resolved branch", "repo", r.Name, "branch", branch)
+					break
+				}
+			}
+			if err != nil {
+				slog.Error("init-sync-state: no default branch found (tried main/master/develop/trunk)",
+					"repo", r.Name, "last_err", err)
+				continue
+			}
+			if err := db.SyncRuns.SetRepoSyncSHA(ctx, r.Name, sha); err != nil {
+				slog.Error("init-sync-state: write failed", "repo", r.Name, "err", err)
+				continue
+			}
+			slog.Info("init-sync-state: ok", "repo", r.Name, "sha", sha)
 		}
 		return
 	}

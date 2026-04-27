@@ -77,7 +77,10 @@ func (c *GitHubClient) EnsureRepo(ctx context.Context, repoPath, description str
 		return fmt.Errorf("check github repo %s: %w", repoPath, err)
 	}
 
-	// Create it.
+	// Create it. POST /orgs/{owner}/repos works for organizations; for user
+	// accounts that endpoint 404s and we must use POST /user/repos, which
+	// always creates under the authenticated user. We detect the owner type
+	// via Users.Get and pick the correct endpoint.
 	private := true
 	newRepo := &gogithub.Repository{
 		Name:    gogithub.String(name),
@@ -86,7 +89,27 @@ func (c *GitHubClient) EnsureRepo(ctx context.Context, repoPath, description str
 	if description != "" {
 		newRepo.Description = gogithub.String(description)
 	}
-	_, _, err = c.client.Repositories.Create(ctx, owner, newRepo)
+
+	ownerInfo, _, ownerErr := c.client.Users.Get(ctx, owner)
+	if ownerErr != nil {
+		return fmt.Errorf("lookup github owner %s: %w", owner, ownerErr)
+	}
+	createOwner := owner
+	if ownerInfo.GetType() == "User" {
+		// Verify the configured owner is the authenticated user — POST
+		// /user/repos can only create under the token's own account.
+		authUser, _, authErr := c.client.Users.Get(ctx, "")
+		if authErr != nil {
+			return fmt.Errorf("lookup authenticated user: %w", authErr)
+		}
+		if !strings.EqualFold(authUser.GetLogin(), owner) {
+			return fmt.Errorf(
+				"cannot create repo under user %q with token belonging to %q: GitHub only allows user-account repo creation under the authenticated user",
+				owner, authUser.GetLogin())
+		}
+		createOwner = ""
+	}
+	_, _, err = c.client.Repositories.Create(ctx, createOwner, newRepo)
 	if err != nil {
 		return fmt.Errorf("create github mirror repo %s: %w", repoPath, err)
 	}

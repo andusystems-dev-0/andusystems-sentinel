@@ -19,7 +19,7 @@
 | **GitHub** | Mirror target; PAT with `repo` scope |
 | **Discord** | Operator interface; bot with message content + reaction intents |
 | **Ollama** | Local LLM; requires `qwen2.5-coder:14b` model pulled |
-| **[AI_ASSISTANT] Code CLI** | Optional; enables execution of fix/feat/vulnerability/refactor tasks, sanitization Layer 3, and documentation generation |
+| **Claude Code CLI** | Optional; enables execution of fix/feat/vulnerability/refactor tasks, sanitization Layer 3, and documentation generation |
 
 ## Project Structure
 
@@ -35,7 +35,7 @@ internal/
   forge/                    -- Forgejo (Gitea SDK) + GitHub (go-github) API clients
   llm/                      -- Ollama client, batcher, prompt loading, semaphore
   sanitize/                 -- Three-layer sanitization pipeline
-  executor/                 -- [AI_ASSISTANT] Code CLI invocation via os/exec; prompt templating
+  executor/                 -- Claude Code CLI invocation via os/exec; prompt templating
   pipeline/                 -- Mode 1 nightly orchestration (preflight, routing, dependencies)
   sync/                     -- Mode 3 incremental sync
   migration/                -- Mode 4 full-repo migration with auto-bootstrap
@@ -43,7 +43,7 @@ internal/
   discord/                  -- Discord bot: embeds, reactions, threads, digest, commands
   prnotify/                 -- PR notifications, reaction handlers, Forgejo->Discord sync
   worktree/                 -- Git worktree lifecycle, per-repo locking, token_index
-  [AI_ASSISTANT]/                   -- [AI_ASSISTANT] Code CLI wrapper
+  claude/                   -- Claude Code CLI wrapper
   docs/                     -- Documentation generation, changelog, Obsidian vault integration
 prompts/                    -- LLM role prompts (Roles A through G)
 fixtures/                   -- Test data: webhook payloads, diffs, synthetic secrets
@@ -69,7 +69,7 @@ Create a `.env` file in the project root (never commit this):
 ```bash
 FORGEJO_SENTINEL_TOKEN=<sentinel-account-token>
 FORGEJO_OPERATOR_TOKEN=<operator-token-with-merge-perms>
-DISCORD_BOT_TOKEN=Bot <your-bot-token>
+DISCORD_BOT_TOKEN=<your-bot-token>   # raw token only — code prepends "Bot " in discord/bot.go
 GITHUB_TOKEN=<github-pat>
 FORGEJO_WEBHOOK_SECRET=<shared-secret>
 # Optional
@@ -151,7 +151,7 @@ These use CLI tools in `tools/` to exercise specific subsystems:
 | `make reaction-test` | Simulate finding reactions |
 | `make pr-reaction-test` | Simulate PR reactions + Forgejo webhook sync |
 | `make forgejo-sync-test` | Simulate Forgejo merge/close events, verify Discord embed |
-| `make [AI_ASSISTANT]-api-test` | Send fixture to [AI_ASSISTANT] API sanitization layer, print findings |
+| `make claude-api-test` | Send fixture to Claude API sanitization layer, print findings |
 
 ### Mode-Specific Test Invocations
 
@@ -177,7 +177,7 @@ These use CLI tools in `tools/` to exercise specific subsystems:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | (empty) | Enables sanitization Layer 3 ([AI_ASSISTANT] API pass) |
+| `ANTHROPIC_API_KEY` | (empty) | Enables sanitization Layer 3 (Claude API pass) |
 | `SENTINEL_DB_PATH` | `/data/db/sentinel.db` | SQLite database file path |
 | `SENTINEL_INGRESS_HOST` | (empty) | If set, auto-registers Forgejo webhooks on all repos at startup |
 
