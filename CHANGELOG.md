@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
 - Full scan option for nightly runs via Discord bot `/sentinel nightly --force` command
 - `GitLogsChannelID` Discord configuration for dedicated git operation logging
 - Dedicated PR channel (`pr_channel_id`) with fallback to actions channel
@@ -19,12 +20,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SPA handler with client-side routing support and cache-optimized static assets
 - Drift reconciliation: periodic checks catch missed webhooks and trigger Mode 3 sync
 - Auto-bootstrap: automatically runs Mode 4 migration for sync-enabled repos with missing or empty GitHub mirrors on daemon startup
-- [AI_ASSISTANT] Code CLI integration for sanitization Layer 2 fallback and Layer 3
+- Claude Code CLI integration for sanitization Layer 2 fallback and Layer 3
 - GitHub repository management (create, ensure description, visibility sync)
 - GitHub identity configuration (`github.git_name`, `github.git_email`) for mirror commit authorship
 - GitHub description synchronization in doc-gen command
 - Scrub patterns (`sanitize.scrub_patterns`) for regex-based content substitution before mirroring
-- Layer 2 timeout with [AI_ASSISTANT] Code CLI fallback (`sanitize.layer2_timeout_seconds`)
+- Layer 2 timeout with Claude Code CLI fallback (`sanitize.layer2_timeout_seconds`)
 - Configurable Layer 3 enable/disable (`sanitize.layer3_enabled`)
 - Documentation generation mode (`--mode doc-gen`) with Obsidian vault integration
 - Changelog management (`internal/docs/changelog.go`) with LLM-assisted generation
@@ -34,12 +35,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ObsidianConfig` for vault path and directory structure
 - Session budget minutes configuration (`nightly.session_budget_minutes`)
 - Mention tracking with cooldown for Discord @here notifications
+- `sentinel.local_checkout_base` configuration: after sentinel merges a doc-gen PR, fast-forwards the operator's local working clone so the next push does not overwrite generated docs
 - Full daemon mode with webhook server, Discord bot, cron scheduler, drift reconciler, and REST API
-- Mode 1 -- Nightly pipeline: cron-driven code analysis via Ollama, task routing, PR creation
-- Mode 2 -- PR Review: webhook-driven LLM review with verdict, per-file notes, housekeeping PRs
-- Mode 3 -- Incremental sync: sanitize changed files and push to GitHub mirror
-- Mode 4 -- Full migration: one-time complete repo scan, sanitization, and GitHub mirror push
-- Three-layer sanitization pipeline (gitleaks, Ollama semantic analysis, [AI_ASSISTANT] Code CLI safety net)
+- Mode 1 — Nightly pipeline: cron-driven code analysis via Ollama, task routing, PR creation
+- Mode 2 — PR Review: webhook-driven LLM review with verdict, per-file notes, housekeeping PRs
+- Mode 3 — Incremental sync: sanitize changed files and push to GitHub mirror
+- Mode 4 — Full migration: one-time complete repo scan, sanitization, and GitHub mirror push
+- Three-layer sanitization pipeline (gitleaks, Ollama semantic analysis, Claude Code CLI safety net)
 - Discord bot with operator-gated emoji reactions for merge, close, approve, reject, re-analyse
 - PR notification system with Forgejo-to-Discord synchronisation
 - Webhook HTTP server with HMAC-SHA256 validation and async worker pool
@@ -57,12 +59,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Graceful shutdown with cron drain, webhook drain, and WAL checkpoint
 
 ### Changed
+
+- Claude Code CLI now operates via subscription mode rather than direct API calls for sanitization Layer 2 fallback and Layer 3
 - Refactored Discord channel handling to support separate PR, actions, logs, and git-logs channels
 - Nightly runner now tracks sessions with start/end times and publishes SSE events for dashboard
 - Removed budget filtering from nightly runner tasks (session budget is advisory, not enforced as a hard cap)
-- Sanitization Layer 3 now uses [AI_ASSISTANT] Code CLI instead of direct [AI_PROVIDER] API calls
 
 ### Fixed
+
+- Sync push now uses MixedReset followed by per-file `git add` to prevent workflow files from being dropped during GitHub mirror pushes
+- `DISCORD_BOT_TOKEN` documentation corrected: the environment variable holds the raw token only; `discord/bot.go` prepends the `Bot ` prefix automatically
 - Sync status messaging now correctly reports findings count and push result
 - Error handling improvements in sync pipeline for partial failures
 - `RenderTaskSpec` function signature updated for consistency

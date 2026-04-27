@@ -15,11 +15,11 @@
 
 | Component | Purpose |
 |-----------|---------|
-| **Forgejo** | Source git forge; two tokens required (sentinel + operator) |
+| **Forgejo** | Source git forge; two tokens required (sentinel service account + operator merge token) |
 | **GitHub** | Mirror target; PAT with `repo` scope |
 | **Discord** | Operator interface; bot with message content + reaction intents |
 | **Ollama** | Local LLM; requires `qwen2.5-coder:14b` model pulled |
-| **Claude Code CLI** | Optional; enables execution of fix/feat/vulnerability/refactor tasks, sanitization Layer 3, and documentation generation |
+| **Claude Code CLI** | Optional; enables execution of fix/feat/vulnerability/refactor tasks, sanitization Layer 2 fallback + Layer 3, and documentation generation |
 
 ## Project Structure
 
@@ -43,7 +43,7 @@ internal/
   discord/                  -- Discord bot: embeds, reactions, threads, digest, commands
   prnotify/                 -- PR notifications, reaction handlers, Forgejo->Discord sync
   worktree/                 -- Git worktree lifecycle, per-repo locking, token_index
-  claude/                   -- Claude Code CLI wrapper
+  claude/                   -- Claude Code CLI wrapper for sanitization
   docs/                     -- Documentation generation, changelog, Obsidian vault integration
 prompts/                    -- LLM role prompts (Roles A through G)
 fixtures/                   -- Test data: webhook payloads, diffs, synthetic secrets
@@ -69,7 +69,8 @@ Create a `.env` file in the project root (never commit this):
 ```bash
 FORGEJO_SENTINEL_TOKEN=<sentinel-account-token>
 FORGEJO_OPERATOR_TOKEN=<operator-token-with-merge-perms>
-DISCORD_BOT_TOKEN=<your-bot-token>   # raw token only — code prepends "Bot " in discord/bot.go
+# Raw token only — code prepends "Bot " in discord/bot.go
+DISCORD_BOT_TOKEN=<raw-bot-token>
 GITHUB_TOKEN=<github-pat>
 FORGEJO_WEBHOOK_SECRET=<shared-secret>
 # Optional
@@ -148,10 +149,10 @@ These use CLI tools in `tools/` to exercise specific subsystems:
 | `make webhook-test` | Send fixture webhook payload to local server |
 | `make llm-test` | Send fixture diff to Ollama, print TaskSpec JSON |
 | `make discord-test` | Connect bot, post synthetic notification, verify reactions |
-| `make reaction-test` | Simulate finding reactions |
-| `make pr-reaction-test` | Simulate PR reactions + Forgejo webhook sync |
+| `make reaction-test` | Simulate finding reactions (✅/❌/🔍/✏️) |
+| `make pr-reaction-test` | Simulate PR reactions (✅/❌/💬) + Forgejo webhook sync |
 | `make forgejo-sync-test` | Simulate Forgejo merge/close events, verify Discord embed |
-| `make claude-api-test` | Send fixture to Claude API sanitization layer, print findings |
+| `make claude-api-test` | Send fixture to Claude Code sanitization layer, print findings |
 
 ### Mode-Specific Test Invocations
 
@@ -167,9 +168,9 @@ These use CLI tools in `tools/` to exercise specific subsystems:
 
 | Variable | Description |
 |----------|-------------|
-| `FORGEJO_SENTINEL_TOKEN` | Read-only Forgejo service account token; no merge permission |
+| `FORGEJO_SENTINEL_TOKEN` | Forgejo service account token; no merge permission |
 | `FORGEJO_OPERATOR_TOKEN` | Merge-only token; used in exactly one code path (`forge/forgejo.go:MergePR`) |
-| `DISCORD_BOT_TOKEN` | Full bot token including `Bot ` prefix |
+| `DISCORD_BOT_TOKEN` | Raw Discord bot token; the code in `discord/bot.go` prepends the `Bot ` prefix |
 | `GITHUB_TOKEN` | GitHub PAT with `repo` scope |
 | `FORGEJO_WEBHOOK_SECRET` | HMAC-SHA256 shared secret for webhook validation |
 
@@ -177,42 +178,63 @@ These use CLI tools in `tools/` to exercise specific subsystems:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | (empty) | Enables sanitization Layer 3 (Claude API pass) |
+| `ANTHROPIC_API_KEY` | (empty) | Enables the Claude API pass in sanitization Layer 3 |
 | `SENTINEL_DB_PATH` | `/data/db/sentinel.db` | SQLite database file path |
 | `SENTINEL_INGRESS_HOST` | (empty) | If set, auto-registers Forgejo webhooks on all repos at startup |
 
-Config resolution order: YAML file -> environment variable override. See `internal/config/env.go` for the field-by-field mapping.
+Config resolution order: YAML file → environment variable override. See `internal/config/env.go` for the field-by-field mapping.
 
 ## Discord Bot Setup
 
-1. Create a new application at the Discord Developer Portal
-2. Under **Bot**, enable privileged intents: `Message Content Intent`, `Server Members Intent`
-3. Under **OAuth2 -> URL Generator**, select scopes `bot` + `applications.commands` with permissions:
+1. Create a new application at the Discord Developer Portal.
+2. Under **Bot**, enable privileged intents: `Message Content Intent`, `Server Members Intent`.
+3. Under **OAuth2 → URL Generator**, select scopes `bot` + `applications.commands` with permissions:
    - Send Messages
    - Add Reactions
    - Create Public Threads
    - Read Message History
-4. Invite the bot to your server using the generated URL
-5. Create channels for PR notifications, findings/logs, and commands
-6. Copy channel IDs and your Discord user ID into `config.yaml`
+4. Invite the bot to your server using the generated URL.
+5. Create channels for PR notifications, findings/logs, commands, and git-logs.
+6. Copy channel IDs and your Discord user ID into `config.yaml`.
 
 ### Discord Channel Layout
 
 | Channel | Config Field | Purpose |
 |---------|-------------|---------|
-| **Actions** | `actions_channel_id` | Interactive: migration confirmations, `/sentinel` commands |
+| **Actions** | `actions_channel_id` | Migration confirmations, `/sentinel` slash commands |
 | **PRs** | `pr_channel_id` | PR embeds with merge/close/discuss reactions |
 | **Logs** | `logs_channel_id` | Finding embeds, sync/migration status, errors |
 | **Git Logs** | `git_logs_channel_id` | Git operation logs |
 
 If `pr_channel_id` is not set, PR notifications fall back to the actions channel.
 
+### Discord Reaction Handlers
+
+**Finding reactions** (logs channel):
+
+| Reaction | Action |
+|----------|--------|
+| ✅ | Approve suggested replacement; resolve token, push staged file, mark `approved` |
+| ❌ | Reject; do not push; mark `rejected`; original value stays in Forgejo only |
+| 🔍 | Re-analyse via Ollama Role D; mark `reanalyzing`, post result in thread |
+| ✏️ | Prompt for custom value in thread; on reply, resolve with custom string |
+
+**PR reactions** (PRs channel):
+
+| Reaction | Action |
+|----------|--------|
+| ✅ | Merge PR via Forgejo API using `FORGEJO_OPERATOR_TOKEN` |
+| ❌ | Close PR without merging |
+| 💬 | Open/focus discussion thread; route follow-up messages to LLM Role F |
+
+All reaction handlers validate that the reactor's Discord user ID is in `config.discord.operator_user_ids`. Non-operator reactions are silently ignored.
+
 ## Forgejo Account Setup
 
 The `sentinel` service account needs per-repo permissions:
 - **Read:** code, issues, pull requests
 - **Write:** issues, pull requests (to open PRs and post comments)
-- **No merge permission** -- enforced at the Forgejo role level
+- **No merge permission** — enforced at the Forgejo role level
 
 The operator token (for merging) should belong to a separate account or be a personal token with merge permission.
 
@@ -235,7 +257,7 @@ helm install sentinel charts/sentinel \
 
 ### Storage
 
-Three RWO PVCs are created by the Helm chart:
+Three `ReadWriteOnce` PVCs are created by the Helm chart:
 
 | PVC | Mount | Size | Contents |
 |-----|-------|------|----------|
@@ -251,43 +273,43 @@ Three RWO PVCs are created by the Helm chart:
 kubectl apply -f argocd/sentinel-app.yaml
 ```
 
-Sync is **manual only**. Sentinel has side effects on Forgejo, GitHub, and Discord. Never enable auto-sync without an idempotency audit.
+Sync is **manual only**. Sentinel has side effects on Forgejo, GitHub, and Discord. Never enable auto-sync without a full idempotency audit.
 
 ## Token Rotation
 
-1. Generate the new token
-2. Update the environment variable (or Kubernetes Secret)
-3. Restart sentinel -- tokens are read at startup only
-4. Revoke the old token
+1. Generate the new token.
+2. Update the environment variable (or Kubernetes Secret).
+3. Restart sentinel — tokens are read at startup only.
+4. Revoke the old token.
 
-For `FORGEJO_WEBHOOK_SECRET`: update both the Kubernetes Secret and the webhook settings in each Forgejo repo.
+For `FORGEJO_WEBHOOK_SECRET`: update both the Kubernetes Secret and the webhook settings in each Forgejo repository.
 
 ## Adding a New Store Table
 
-1. Write `CREATE TABLE IF NOT EXISTS` DDL in `internal/store/migrations.go`
-2. Create `internal/store/<tablename>.go` with CRUD methods
-3. Declare the store interface in `internal/types/interfaces.go`
-4. Wire into `store/db.go` (return from `Open()`)
-5. Inject into components in `cmd/sentinel/main.go`
-6. Run `make test`
+1. Write `CREATE TABLE IF NOT EXISTS` DDL in `internal/store/migrations.go`.
+2. Create `internal/store/<tablename>.go` with CRUD methods.
+3. Declare the store interface in `internal/types/interfaces.go`.
+4. Wire into `store/db.go` (return from `Open()`).
+5. Inject into components in `cmd/sentinel/main.go`.
+6. Run `make test` — SQLite migrations are idempotent; existing databases survive.
 
 ## Adding a New Task Type (Mode 1)
 
-1. Add the type string constant to `internal/types/types.go`
-2. Add routing logic in `internal/pipeline/router.go`
-3. If needed, implement the `TaskExecutor` interface from `internal/types/interfaces.go`
-4. Add test fixtures in `fixtures/`
-5. Update `config.yaml.example` `high_priority_types` comment if relevant
+1. Add the type string constant to `internal/types/types.go`.
+2. Add routing logic in `internal/pipeline/router.go` (type + complexity → executor).
+3. If needed, implement the `TaskExecutor` interface from `internal/types/interfaces.go`.
+4. Add test fixtures in `fixtures/`.
+5. Update `config.yaml.example` `high_priority_types` comment if relevant.
 
 ## Adding a New API Endpoint
 
-1. Add the handler method to `internal/api/handlers.go`
-2. Register the route in `internal/api/server.go:RegisterRoutes`
-3. If it needs real-time updates, publish events via `EventBus.Publish` in the relevant subsystem
+1. Add the handler method to `internal/api/handlers.go`.
+2. Register the route in `internal/api/server.go:RegisterRoutes`.
+3. If it needs real-time updates, publish events via `EventBus.Publish` in the relevant subsystem.
 
 ## Known Stubs
 
 These exist in the codebase but are not fully wired:
 
-- **Push event dispatch** -- push events are logged but sentinel-branch-push detection path is incomplete for some edge cases.
-- **LLM Roles E, F, G** -- Thread Q&A and housekeeping PR generation are partially stubbed. Basic posting works; full back-and-forth Q&A may not.
+- **Push event dispatch** — push events are logged, but the sentinel-branch-push detection path is incomplete for some edge cases.
+- **LLM Roles E, F, G** — Thread Q&A (Roles E, F) and housekeeping PR generation (Role G) are partially stubbed. Basic posting works; full back-and-forth Q&A may not.
