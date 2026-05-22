@@ -354,6 +354,20 @@ func (m *Manager) AutoBootstrap(ctx context.Context) {
 		if r.Excluded || !r.SyncEnabled {
 			continue
 		}
+		// Skip repos whose Forgejo side is empty — there's nothing to mirror
+		// yet. The user's first push to Forgejo fires a webhook → Mode 3 sync,
+		// which itself calls EnsureRepo on GitHub and populates the mirror.
+		forgejoEmpty, err := m.forge.IsEmpty(ctx, r.ForgejoPath)
+		if err != nil {
+			slog.Warn("bootstrap: forgejo empty-check failed",
+				"repo", r.Name, "forgejo_path", r.ForgejoPath, "err", err)
+			continue
+		}
+		if forgejoEmpty {
+			slog.Info("bootstrap: forgejo repo empty, skipping until first push",
+				"repo", r.Name, "forgejo_path", r.ForgejoPath)
+			continue
+		}
 		if err := m.github.EnsureRepo(ctx, r.GitHubPath, r.Description); err != nil {
 			slog.Warn("bootstrap: ensure github repo failed",
 				"repo", r.Name, "github_path", r.GitHubPath, "err", err)

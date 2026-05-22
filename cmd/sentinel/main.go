@@ -297,8 +297,13 @@ func main() {
 
 	// ---- Full daemon mode ("run") --------------------------------------------
 
-	// Register webhooks on all repos at startup (best-effort).
+	// Create any missing Forgejo repos before webhook registration so
+	// hook creation doesn't fail on first-startup-for-a-new-repo. New repos
+	// are created empty (no auto-init); the user's first push lands as the
+	// initial commit and the webhook fires Mode 3.
 	go func() {
+		forgejoClient.EnsureAllRepos(ctx)
+
 		ingressHost := os.Getenv("SENTINEL_INGRESS_HOST")
 		if ingressHost != "" {
 			if err := forgejoClient.RegisterAllWebhooks(ctx, ingressHost); err != nil {

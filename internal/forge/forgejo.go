@@ -5,6 +5,8 @@ package forge
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
 
 	gitea "code.gitea.io/sdk/gitea"
@@ -50,6 +52,102 @@ func (c *ForgejoClient) forgejoPaths(repo string) (string, string, error) {
 	return "", "", fmt.Errorf("repo %q not found in config", repo)
 }
 
+// EnsureRepo creates the Forgejo repo at repoPath if it doesn't exist, and
+// keeps its description in sync. The owner segment is created as an org repo
+// when the owner is an organization, otherwise under the authenticated user
+// (which must match the owner). Newly created repos are private and empty
+// (no auto-init) so the user's first push lands as the initial commit.
+func (c *ForgejoClient) EnsureRepo(ctx context.Context, repoPath, description string) error {
+	owner, name, err := splitPath(repoPath)
+	if err != nil {
+		return err
+	}
+
+	existing, resp, err := c.client.GetRepo(owner, name)
+	if err == nil {
+		if description == "" || existing.Description == description {
+			return nil
+		}
+		_, _, err = c.client.EditRepo(owner, name, gitea.EditRepoOption{
+			Description: &description,
+		})
+		if err != nil {
+			return fmt.Errorf("update forgejo repo description %s: %w", repoPath, err)
+		}
+		return nil
+	}
+	if resp == nil || resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("check forgejo repo %s: %w", repoPath, err)
+	}
+
+	opt := gitea.CreateRepoOption{
+		Name:        name,
+		Description: description,
+		Private:     true,
+		AutoInit:    false,
+	}
+
+	// Detect owner type: org → CreateOrgRepo, user → CreateRepo (under the
+	// authenticated user, which must match `owner`).
+	if _, _, orgErr := c.client.GetOrg(owner); orgErr == nil {
+		_, _, err = c.client.CreateOrgRepo(owner, opt)
+		if err != nil {
+			return fmt.Errorf("create forgejo org repo %s: %w", repoPath, err)
+		}
+		return nil
+	}
+
+	authUser, _, authErr := c.client.GetMyUserInfo()
+	if authErr != nil {
+		return fmt.Errorf("lookup authenticated forgejo user: %w", authErr)
+	}
+	if !strings.EqualFold(authUser.UserName, owner) {
+		return fmt.Errorf(
+			"cannot create forgejo repo under %q with token belonging to %q: not an org and not the authenticated user",
+			owner, authUser.UserName)
+	}
+	_, _, err = c.client.CreateRepo(opt)
+	if err != nil {
+		return fmt.Errorf("create forgejo user repo %s: %w", repoPath, err)
+	}
+	return nil
+}
+
+// IsEmpty reports whether the Forgejo repo at repoPath has zero commits (or
+// does not exist). Used by the auto-bootstrap path to skip migration for
+// freshly-created Forgejo repos that the user has not pushed to yet.
+func (c *ForgejoClient) IsEmpty(ctx context.Context, repoPath string) (bool, error) {
+	owner, name, err := splitPath(repoPath)
+	if err != nil {
+		return false, err
+	}
+	commits, resp, err := c.client.ListRepoCommits(owner, name, gitea.ListCommitOptions{
+		ListOptions: gitea.ListOptions{Page: 1, PageSize: 1},
+	})
+	if err == nil {
+		return len(commits) == 0, nil
+	}
+	if resp != nil && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict) {
+		return true, nil
+	}
+	return false, fmt.Errorf("list forgejo commits %s: %w", repoPath, err)
+}
+
+// EnsureAllRepos calls EnsureRepo for every non-excluded repo in config. Errors
+// on individual repos are logged but do not abort the loop — startup must
+// proceed even if one repo cannot be reached.
+func (c *ForgejoClient) EnsureAllRepos(ctx context.Context) {
+	for _, r := range c.cfg.Repos {
+		if r.Excluded {
+			continue
+		}
+		if err := c.EnsureRepo(ctx, r.ForgejoPath, r.Description); err != nil {
+			slog.Warn("ensure forgejo repo failed",
+				"repo", r.Name, "forgejo_path", r.ForgejoPath, "err", err)
+		}
+	}
+}
+
 // GetPRDiff fetches the raw diff for a Forgejo pull request.
 func (c *ForgejoClient) GetPRDiff(ctx context.Context, repo string, prNumber int) (string, error) {
 	org, repoName, err := c.forgejoPaths(repo)
@@ -84,20 +182,39 @@ func (c *ForgejoClient) CreatePR(ctx context.Context, opts types.OpenPROptions) 
 	return int(pr.Index), pr.HTMLURL, nil
 }
 
-// CreateBranch creates a new branch from fromSHA on Forgejo.
-func (c *ForgejoClient) CreateBranch(ctx context.Context, repo, name, fromSHA string) error {
+// CreateBranch creates a new branch on Forgejo. fromRef can be a branch name
+// (e.g. "main") or a commit SHA — but Forgejo's API only reliably accepts
+// branch names for OldBranchName. When a 40-hex SHA is provided, we fall back
+// to branching from "main".
+func (c *ForgejoClient) CreateBranch(ctx context.Context, repo, name, fromRef string) error {
 	org, repoName, err := c.forgejoPaths(repo)
 	if err != nil {
 		return err
 	}
+	oldBranch := fromRef
+	if looksLikeSHA(fromRef) {
+		oldBranch = "main"
+	}
 	_, _, err = c.client.CreateBranch(org, repoName, gitea.CreateBranchOption{
-		BranchName: name,
-		OldBranchName: fromSHA, // Gitea SDK accepts SHA or branch name here
+		BranchName:    name,
+		OldBranchName: oldBranch,
 	})
 	if err != nil {
 		return fmt.Errorf("create branch %s in %s: %w", name, repo, err)
 	}
 	return nil
+}
+
+func looksLikeSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // MergePR merges a pull request using the specified token (sentinel or operator).

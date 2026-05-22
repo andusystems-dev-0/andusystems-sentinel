@@ -4,8 +4,8 @@ package types
 import "context"
 
 // ForgejoWorktreeLock provides RW locking on the Forgejo worktree per repo.
-// Write lock: git pull, branch creation, [AI_ASSISTANT] Code invocation.
-// Read lock: diff reads for LLM analysis, Mode 2 review.
+// Write lock: git pull, branch creation, Claude Code invocation.
+// Read lock: diff reads for LLM analysis.
 type ForgejoWorktreeLock interface {
 	RLock(repo string)
 	RUnlock(repo string)
@@ -81,7 +81,7 @@ type SanitizationPipeline interface {
 // LLMClient wraps Ollama for all LLM roles.
 type LLMClient interface {
 	Analyze(ctx context.Context, opts AnalyzeOpts) ([]TaskSpec, error)
-	ReviewPR(ctx context.Context, opts ReviewOpts) (*ReviewResult, error)
+	PlanTask(ctx context.Context, opts PlanOpts) (*TaskPlan, error)
 	WriteProse(ctx context.Context, opts ProseOpts) (string, error)
 	SanitizeChunk(ctx context.Context, content string) ([]SanitizationFinding, error)
 	AnswerThread(ctx context.Context, opts ThreadOpts) (string, error)
@@ -157,13 +157,15 @@ type MigrationManager interface {
 	Status(ctx context.Context, repo string) (*MigrationState, error)
 }
 
-// TaskExecutor invokes [AI_ASSISTANT] Code CLI.
+// TaskExecutor invokes Claude Code CLI.
 type TaskExecutor interface {
 	Execute(ctx context.Context, spec TaskSpec, branch, repo string) (*TaskResult, error)
 }
 
 // ForgejoProvider wraps the Forgejo API.
 type ForgejoProvider interface {
+	EnsureRepo(ctx context.Context, repoPath, description string) error
+	IsEmpty(ctx context.Context, repoPath string) (bool, error)
 	GetPRDiff(ctx context.Context, repo string, prNumber int) (string, error)
 	CreatePR(ctx context.Context, opts OpenPROptions) (int, string, error)
 	CreateBranch(ctx context.Context, repo, name, fromSHA string) error
