@@ -1,6 +1,6 @@
 # sentinel
 
-> Autonomous SDLC orchestration engine that monitors Forgejo repositories, sanitizes secrets, and surfaces operator decisions through Discord reactions.
+> Autonomous Software Development Lifecycle orchestration engine that monitors Forgejo repositories, sanitizes secrets, and surfaces operator decisions through Discord reactions.
 
 ## Purpose
 
